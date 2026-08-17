@@ -1,0 +1,247 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: cloudbot_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres -d cloudbot_test"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=10
+    env:
+      APP_ENV: testing
+      APP_DEBUG: "false"
+      DB_CONNECTION: pgsql
+      DB_HOST: 127.0.0.1
+      DB_PORT: 5432
+      DB_DATABASE: cloudbot_test
+      DB_USERNAME: postgres
+      DB_PASSWORD: postgres
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: 6379
+      CACHE_STORE: redis
+      SESSION_DRIVER: array
+      QUEUE_CONNECTION: sync
+      MAIL_MAILER: array
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          extensions: mbstring, pdo_pgsql, pgsql, redis, intl, bcmath, pcntl, gd, zip
+          coverage: none
+          tools: composer:v2
+
+      - name: Install Composer dependencies
+        uses: ramsey/composer-install@v3
+        with:
+          dependency-versions: locked
+          composer-options: "--no-interaction --prefer-dist --no-progress"
+
+      - name: Prepare Laravel environment
+        run: |
+          cp .env.example .env
+          php artisan key:generate --force
+
+      - name: Prepare PostgreSQL PHPUnit configuration
+        run: |
+          cp phpunit.xml phpunit.ci.xml
+          php -r '
+            $file = "phpunit.ci.xml";
+            $xml = file_get_contents($file);
+            $xml = str_replace("<env name=\"DB_CONNECTION\" value=\"sqlite\"/>", "<env name=\"DB_CONNECTION\" value=\"pgsql\" force=\"true\"/>", $xml);
+            $xml = str_replace("<env name=\"DB_DATABASE\" value=\":memory:\"/>", "<env name=\"DB_DATABASE\" value=\"cloudbot_test\" force=\"true\"/>", $xml);
+            $xml = str_replace("<env name=\"CACHE_STORE\" value=\"array\"/>", "<env name=\"CACHE_STORE\" value=\"redis\" force=\"true\"/>", $xml);
+            file_put_contents($file, $xml);
+          '
+
+      - name: Verify PostgreSQL and Redis connectivity
+        run: |
+          php artisan tinker --execute="if (config('database.default') !== 'pgsql') { throw new RuntimeException('CI database driver must be pgsql'); } DB::connection()->getPdo(); Cache::store('redis')->put('ci-health', 'ok', 30); if (Cache::store('redis')->get('ci-health') !== 'ok') { throw new RuntimeException('Redis connectivity check failed'); } echo 'PostgreSQL + Redis OK';"
+
+      - name: Run fresh PostgreSQL migrations
+        run: php artisan migrate:fresh --force
+
+      - name: Run full test suite on PostgreSQL
+        run: php artisan test --configuration=phpunit.ci.xml
+
+  static-analysis:
+    name: Static Analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          extensions: mbstring, pdo_pgsql, pgsql, intl, bcmath
+          coverage: none
+          tools: composer:v2
+
+      - name: Install Composer dependencies
+        uses: ramsey/composer-install@v3
+        with:
+          dependency-versions: locked
+          composer-options: "--no-interaction --prefer-dist --no-progress"
+
+      - name: Run PHPStan
+        run: vendor/bin/phpstan analyse --no-progress
+
+  code-style:
+    name: Code Style
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          coverage: none
+          tools: composer:v2
+
+      - name: Install Composer dependencies
+        uses: ramsey/composer-install@v3
+        with:
+          dependency-versions: locked
+          composer-options: "--no-interaction --prefer-dist --no-progress"
+
+      - name: Run Pint
+        run: vendor/bin/pint --test
+
+  deployment-scripts:
+    name: Deployment Scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate shell syntax
+        run: |
+          bash -n install.sh
+          bash -n update.sh
+          bash -n backup.sh
+          bash -n restore.sh
+
+      - name: Validate Docker Compose configuration
+        run: docker compose config
+
+      - name: Verify obvious secret artifacts are not tracked
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          forbidden_exact=(
+            ".env"
+            ".env.production"
+            ".env.local"
+          )
+
+          for file in "${forbidden_exact[@]}"; do
+            if git ls-files --error-unmatch "$file" >/dev/null 2>&1; then
+              echo "Forbidden secret file is tracked: $file" >&2
+              exit 1
+            fi
+          done
+
+          if git ls-files | grep -E '(^|/)(id_rsa|id_ed25519)$|(^|/).*\.(pem|p12|pfx)$|(^|/)backups/|\.sql\.gz$' >/tmp/forbidden-tracked-files.txt; then
+            echo "Potential secret/backup artifacts are tracked:" >&2
+            cat /tmp/forbidden-tracked-files.txt >&2
+            exit 1
+          fi
+
+          echo "Tracked-file secret safety check passed."
+
+  docker-build:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate Docker Compose configuration
+        run: docker compose config
+
+      - name: Build application image
+        run: docker compose build app
+
+  all-checks:
+    name: CI / All Checks
+    if: always()
+    needs:
+      - tests
+      - static-analysis
+      - code-style
+      - deployment-scripts
+      - docker-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require all jobs to pass
+        env:
+          TESTS_RESULT: ${{ needs.tests.result }}
+          STATIC_ANALYSIS_RESULT: ${{ needs.static-analysis.result }}
+          CODE_STYLE_RESULT: ${{ needs.code-style.result }}
+          DEPLOYMENT_SCRIPTS_RESULT: ${{ needs.deployment-scripts.result }}
+          DOCKER_BUILD_RESULT: ${{ needs.docker-build.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          printf 'Tests: %s\n' "$TESTS_RESULT"
+          printf 'Static Analysis: %s\n' "$STATIC_ANALYSIS_RESULT"
+          printf 'Code Style: %s\n' "$CODE_STYLE_RESULT"
+          printf 'Deployment Scripts: %s\n' "$DEPLOYMENT_SCRIPTS_RESULT"
+          printf 'Docker Build: %s\n' "$DOCKER_BUILD_RESULT"
+
+          test "$TESTS_RESULT" = "success"
+          test "$STATIC_ANALYSIS_RESULT" = "success"
+          test "$CODE_STYLE_RESULT" = "success"
+          test "$DEPLOYMENT_SCRIPTS_RESULT" = "success"
+          test "$DOCKER_BUILD_RESULT" = "success"
