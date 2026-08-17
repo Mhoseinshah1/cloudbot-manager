@@ -4,8 +4,11 @@ namespace App\Filament\Resources;
 
 use App\Filament\Resources\ServerResource\Pages;
 use App\Models\Server;
+use App\Models\ServerAction;
+use App\Services\ServerActionService;
 use Filament\Forms;
 use Filament\Forms\Form;
+use Filament\Notifications\Notification;
 use Filament\Resources\Resource;
 use Filament\Tables;
 use Filament\Tables\Table;
@@ -138,6 +141,36 @@ class ServerResource extends Resource
                 //
             ])
             ->actions([
+                Tables\Actions\Action::make('powerOn')
+                    ->label('Power On')
+                    ->icon('heroicon-o-play')
+                    ->color('success')
+                    ->requiresConfirmation()
+                    ->action(fn (Server $record) => self::runAction($record, ServerAction::ACTION_POWER_ON)),
+                Tables\Actions\Action::make('powerOff')
+                    ->label('Power Off')
+                    ->icon('heroicon-o-stop')
+                    ->color('warning')
+                    ->requiresConfirmation()
+                    ->action(fn (Server $record) => self::runAction($record, ServerAction::ACTION_POWER_OFF)),
+                Tables\Actions\Action::make('reboot')
+                    ->label('Reboot')
+                    ->icon('heroicon-o-arrow-path')
+                    ->requiresConfirmation()
+                    ->action(fn (Server $record) => self::runAction($record, ServerAction::ACTION_REBOOT)),
+                Tables\Actions\Action::make('resetPassword')
+                    ->label('Reset Password')
+                    ->icon('heroicon-o-key')
+                    ->requiresConfirmation()
+                    ->action(function (Server $record): void {
+                        self::runAction($record, ServerAction::ACTION_RESET_PASSWORD);
+                    }),
+                Tables\Actions\Action::make('delete')
+                    ->label('Delete Server')
+                    ->icon('heroicon-o-trash')
+                    ->color('danger')
+                    ->requiresConfirmation()
+                    ->action(fn (Server $record) => self::runAction($record, ServerAction::ACTION_DELETE)),
                 Tables\Actions\EditAction::make(),
             ])
             ->bulkActions([
@@ -152,6 +185,26 @@ class ServerResource extends Resource
         return [
             //
         ];
+    }
+
+    private static function runAction(Server $record, string $action): void
+    {
+        try {
+            $service = app(ServerActionService::class);
+            $service->perform($record, $action, auth()->user());
+
+            Notification::make()
+                ->title(ucwords(str_replace('_', ' ', $action)))
+                ->body("Server [{$record->name}] updated.")
+                ->success()
+                ->send();
+        } catch (\Throwable $e) {
+            Notification::make()
+                ->title('Server action failed')
+                ->body($e->getMessage())
+                ->danger()
+                ->send();
+        }
     }
 
     public static function getPages(): array

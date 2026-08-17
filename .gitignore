@@ -29,4 +29,5 @@ Thumbs.db
 # Deployment artifacts (never committed; secrets stay out of Git)
 /backups/
 /.deploy/
+/storage/framework/phpstan/
 *.sql.gz

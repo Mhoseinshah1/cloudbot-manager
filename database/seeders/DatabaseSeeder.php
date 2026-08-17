@@ -11,6 +11,7 @@ class DatabaseSeeder extends Seeder
         $this->call([
             AdminUserSeeder::class,
             FakeProviderSeeder::class,
+            HetznerProviderSeeder::class,
         ]);
     }
 }

@@ -53,6 +53,7 @@ class Server extends Model
         'provider_location_id',
         'plan_snapshot',
         'image_snapshot',
+        'provider_metadata',
         'status',
         'power_state',
         'provider_cost',
@@ -71,6 +72,7 @@ class Server extends Model
         return [
             'plan_snapshot' => 'array',
             'image_snapshot' => 'array',
+            'provider_metadata' => 'array',
             'provider_cost' => 'decimal:2',
             'exchange_rate' => 'decimal:4',
             'local_cost' => 'integer',

@@ -23,6 +23,10 @@ class ProviderPlan extends Model
         'price_monthly',
         'currency',
         'price_hourly',
+        'cpu_type',
+        'architecture',
+        'storage_type',
+        'deprecated',
         'enabled',
         'metadata',
     ];
@@ -36,9 +40,15 @@ class ProviderPlan extends Model
             'bandwidth_gb' => 'integer',
             'price_monthly' => 'decimal:2',
             'price_hourly' => 'decimal:4',
+            'deprecated' => 'boolean',
             'enabled' => 'boolean',
             'metadata' => 'array',
         ];
+    }
+
+    public function prices(): HasMany
+    {
+        return $this->hasMany(ProviderPlanPrice::class);
     }
 
     public function provider(): BelongsTo

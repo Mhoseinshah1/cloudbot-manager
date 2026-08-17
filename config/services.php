@@ -35,4 +35,13 @@ return [
         ],
     ],
 
+    'hetzner' => [
+        'token' => env('HETZNER_API_TOKEN'),
+        'base_url' => env('HETZNER_API_BASE_URL', 'https://api.hetzner.cloud/v1'),
+        'timeout' => (int) env('HETZNER_API_TIMEOUT', 30),
+        'connect_timeout' => (int) env('HETZNER_API_CONNECT_TIMEOUT', 5),
+        'action_timeout' => (int) env('HETZNER_ACTION_TIMEOUT', 300),
+        'action_polling_interval_ms' => (int) env('HETZNER_ACTION_POLLING_INTERVAL_MS', 2000),
+    ],
+
 ];

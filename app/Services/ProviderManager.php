@@ -28,7 +28,16 @@ class ProviderManager
         return $this->resolve($provider);
     }
 
-    private function build(Provider $provider): CloudProviderInterface
+    /**
+     * Builds an adapter even for disabled providers — used by catalog sync
+     * and reconciliation, which must not be blocked by an enabled flag.
+     */
+    public function resolveForSync(Provider $provider): CloudProviderInterface
+    {
+        return $this->build($provider);
+    }
+
+    public function build(Provider $provider): CloudProviderInterface
     {
         $class = $provider->class;
 

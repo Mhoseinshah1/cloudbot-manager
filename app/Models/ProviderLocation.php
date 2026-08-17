@@ -17,6 +17,7 @@ class ProviderLocation extends Model
         'name',
         'country_code',
         'city',
+        'network_zone',
         'enabled',
         'metadata',
     ];

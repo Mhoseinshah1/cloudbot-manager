@@ -18,6 +18,9 @@ class ProviderImage extends Model
         'os_distro',
         'version',
         'architecture',
+        'type',
+        'status',
+        'deprecated',
         'enabled',
         'metadata',
     ];

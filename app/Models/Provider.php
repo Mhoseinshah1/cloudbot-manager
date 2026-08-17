@@ -5,6 +5,7 @@ namespace App\Models;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class Provider extends Model
 {
@@ -56,6 +57,16 @@ class Provider extends Model
     public function servers(): HasMany
     {
         return $this->hasMany(Server::class);
+    }
+
+    public function catalogSyncs(): HasMany
+    {
+        return $this->hasMany(ProviderCatalogSync::class);
+    }
+
+    public function latestSync(): HasOne
+    {
+        return $this->hasOne(ProviderCatalogSync::class)->latestOfMany();
     }
 
     public function supports(string $capability): bool

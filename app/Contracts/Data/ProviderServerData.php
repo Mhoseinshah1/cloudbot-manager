@@ -16,6 +16,7 @@ class ProviderServerData implements Arrayable
         public ?string $planId = null,
         public ?string $imageId = null,
         public array $metadata = [],
+        public ?ProviderActionData $action = null,
     ) {}
 
     public static function fromArray(array $data): self
@@ -30,6 +31,7 @@ class ProviderServerData implements Arrayable
             planId: $data['plan_id'] ?? null,
             imageId: $data['image_id'] ?? null,
             metadata: $data['metadata'] ?? [],
+            action: isset($data['action']) && is_array($data['action']) ? ProviderActionData::fromArray($data['action']) : null,
         );
     }
 
@@ -45,6 +47,7 @@ class ProviderServerData implements Arrayable
             'plan_id' => $this->planId,
             'image_id' => $this->imageId,
             'metadata' => $this->metadata,
+            'action' => $this->action?->toArray(),
         ];
     }
 }

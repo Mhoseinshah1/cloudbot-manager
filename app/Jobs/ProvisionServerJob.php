@@ -65,17 +65,36 @@ class ProvisionServerJob implements ShouldQueue
             $location = $provider->locations()->where('enabled', true)->first()
                 ?? throw ProviderException::unavailable('Location', 'enabled');
 
-            $image = $provider->images()->where('enabled', true)->first()
+            // Deprecated/unavailable provider images are never offered for provisioning.
+            $image = $provider->images()->where('enabled', true)->whereNull('deprecated')->first()
                 ?? throw ProviderException::unavailable('Image', 'enabled');
+
+            // The DTOs must carry provider-facing ids (provider_plan_id,
+            // provider_location_id, provider_image_id) — never local primary keys.
+            $planDto = ProviderPlanData::fromArray([...$planData->toArray(), 'id' => $planData->provider_plan_id]);
+            $locationDto = ProviderLocationData::fromArray([...$location->toArray(), 'id' => $location->provider_location_id]);
+            $imageDto = ProviderImageData::fromArray([...$image->toArray(), 'id' => $image->provider_image_id]);
 
             $serverName = Str::slug($product->name).'-'.substr($order->order_number, -6);
 
+            // Idempotency label: lets reconciliation find an already-created
+            // server if a create call was retried after an uncertain response.
+            $provisioningUuid = (string) Str::uuid();
+
             $serverData = $manager->resolve($provider)->createServer(
-                plan: ProviderPlanData::fromArray($planData->toArray()),
-                image: ProviderImageData::fromArray($image->toArray()),
-                location: ProviderLocationData::fromArray($location->toArray()),
+                plan: $planDto,
+                image: $imageDto,
+                location: $locationDto,
                 name: $serverName,
+                options: [
+                    'labels' => [
+                        'app' => 'vps-platform',
+                        'provisioning-uuid' => $provisioningUuid,
+                    ],
+                ],
             );
+
+            [$appStatus, $powerState] = $this->mapProviderState($serverData->status);
 
             /** @var array<string, mixed> $cost */
             $cost = $order->cost_snapshot ?? [];
@@ -91,8 +110,12 @@ class ProvisionServerJob implements ShouldQueue
                 'provider_location_id' => $location->id,
                 'plan_snapshot' => $planData->toArray(),
                 'image_snapshot' => $image->toArray(),
-                'status' => Server::STATUS_RUNNING,
-                'power_state' => 'running',
+                'provider_metadata' => array_merge($serverData->metadata, [
+                    'provisioning_uuid' => $provisioningUuid,
+                    'provider_status' => $serverData->status,
+                ]),
+                'status' => $appStatus,
+                'power_state' => $powerState,
                 'provider_cost' => $cost['provider_cost'] ?? null,
                 'provider_currency' => $cost['provider_currency'] ?? null,
                 'exchange_rate' => $cost['exchange_rate'] ?? null,
@@ -159,6 +182,21 @@ class ProvisionServerJob implements ShouldQueue
             'quarterly' => now()->addMonths(3),
             'yearly' => now()->addYear(),
             default => now()->addMonth(),
+        };
+    }
+
+    /**
+     * Maps provider-neutral power state to application server status.
+     *
+     * @return array{0: string, 1: string}
+     */
+    private function mapProviderState(string $providerStatus): array
+    {
+        return match ($providerStatus) {
+            'off', 'stopping', 'stopped' => [Server::STATUS_OFF, 'off'],
+            'initializing', 'starting', 'rebuilding', 'migrating' => [Server::STATUS_PROVISIONING, 'running'],
+            'deleting' => [Server::STATUS_DELETING, 'off'],
+            default => [Server::STATUS_RUNNING, 'running'],
         };
     }
 }
