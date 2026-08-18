@@ -22,10 +22,7 @@ class ProcessTelegramUpdateJob implements ShouldQueue
     /**
      * @param  array<string, mixed>  $update
      */
-    public function __construct(public array $update)
-    {
-        $this->onQueue('telegram');
-    }
+    public function __construct(public array $update) {}
 
     public function handle(TelegramUpdateRouter $router): void
     {
