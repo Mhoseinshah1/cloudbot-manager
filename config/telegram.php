@@ -36,12 +36,10 @@ return [
 
     /*
     |--------------------------------------------------------------------------
-    | Conversation State TTL (seconds)
+    | Conversation state
     |--------------------------------------------------------------------------
-    |
-    | How long Telegram conversation state persists in Redis before expiry.
-    |
     */
+    'state_store' => env('TELEGRAM_STATE_STORE', 'redis'),
     'state_ttl' => (int) env('TELEGRAM_STATE_TTL', 3600),
 
     /*
