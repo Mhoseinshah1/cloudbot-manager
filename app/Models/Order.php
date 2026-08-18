@@ -27,6 +27,8 @@ class Order extends Model
 
     public const STATUS_EXPIRED = 'expired';
 
+    public const PURPOSE_WALLET_TOPUP = 'wallet_topup';
+
     public const STATUSES = [
         self::STATUS_PENDING,
         self::STATUS_PAID,
@@ -49,6 +51,8 @@ class Order extends Model
         'paid_at',
         'provisioned_at',
         'cost_snapshot',
+        'selected_location_id',
+        'selected_image_id',
     ];
 
     protected function casts(): array
@@ -59,7 +63,14 @@ class Order extends Model
             'paid_at' => 'datetime',
             'provisioned_at' => 'datetime',
             'cost_snapshot' => 'array',
+            'selected_location_id' => 'integer',
+            'selected_image_id' => 'integer',
         ];
+    }
+
+    public function isWalletTopUp(): bool
+    {
+        return ($this->cost_snapshot['purpose'] ?? null) === self::PURPOSE_WALLET_TOPUP;
     }
 
     public function user(): BelongsTo
@@ -70,6 +81,16 @@ class Order extends Model
     public function coupon(): BelongsTo
     {
         return $this->belongsTo(Coupon::class);
+    }
+
+    public function selectedLocation(): BelongsTo
+    {
+        return $this->belongsTo(ProviderLocation::class, 'selected_location_id');
+    }
+
+    public function selectedImage(): BelongsTo
+    {
+        return $this->belongsTo(ProviderImage::class, 'selected_image_id');
     }
 
     public function items(): HasMany
