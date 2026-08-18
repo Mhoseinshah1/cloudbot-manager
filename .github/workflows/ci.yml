@@ -102,7 +102,7 @@ jobs:
         run: php artisan migrate:fresh --force
 
       - name: Run full test suite on PostgreSQL
-        run: php artisan test --configuration=phpunit.ci.xml
+        run: vendor/bin/pest --configuration=phpunit.ci.xml
 
   static-analysis:
     name: Static Analysis
