@@ -6,6 +6,7 @@ use App\Models\Order;
 use App\Models\Product;
 use App\Models\Server;
 use App\Models\User;
+use Illuminate\Auth\Access\AuthorizationException;
 use RuntimeException;
 
 /**
@@ -24,11 +25,6 @@ class RenewalService
         private AuditService $audit,
     ) {}
 
-    /**
-     * Create a renewal order for a monthly server.
-     *
-     * Returns the created Order. Caller must then create invoice + payment.
-     */
     public function createRenewalOrder(Server $server, ?User $actor = null): Order
     {
         if ($server->billing_mode !== 'monthly') {
@@ -50,10 +46,13 @@ class RenewalService
             throw new RuntimeException('Server has no associated product; cannot compute renewal price.');
         }
 
-        $order = $this->orders->place(
-            $product->user ?? $actor ?? User::findOrFail($server->user_id),
-            $product,
-        );
+        $owner = User::query()->findOrFail($server->user_id);
+
+        if ($actor !== null && ! $actor->isAdmin() && $actor->id !== $owner->id) {
+            throw new AuthorizationException('You are not allowed to renew this server.');
+        }
+
+        $order = $this->orders->place($owner, $product);
 
         $this->audit->record('renewal.order_created', $server, $actor, after: [
             'order_number' => $order->order_number,
@@ -64,12 +63,6 @@ class RenewalService
         return $order;
     }
 
-    /**
-     * Extend the server's expiration after a successful renewal payment.
-     *
-     * This is the ONLY place where expires_at is mutated for renewals.
-     * It must only be called after payment is confirmed.
-     */
     public function extendExpiration(Server $server, ?User $actor = null): void
     {
         if ($server->expires_at === null) {
@@ -87,9 +80,7 @@ class RenewalService
     }
 
     /**
-     * Complete the full renewal: create order → invoice → payment → confirm → extend.
-     *
-     * For development/testing: uses ManualGateway and extends immediately.
+     * @return array{order: Order, invoice: \App\Models\Invoice, payment: \App\Models\Payment, new_expiry: mixed}
      */
     public function processRenewal(Server $server, ?User $actor = null): array
     {
