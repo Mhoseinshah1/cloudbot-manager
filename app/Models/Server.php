@@ -46,21 +46,13 @@ class Server extends Model
     use HasFactory, SoftDeletes;
 
     public const STATUS_PENDING = 'pending';
-
     public const STATUS_PROVISIONING = 'provisioning';
-
     public const STATUS_RUNNING = 'running';
-
     public const STATUS_OFF = 'off';
-
     public const STATUS_SUSPENDED = 'suspended';
-
     public const STATUS_REBUILDING = 'rebuilding';
-
     public const STATUS_DELETING = 'deleting';
-
     public const STATUS_DELETED = 'deleted';
-
     public const STATUS_ERROR = 'error';
 
     public const STATUSES = [
@@ -109,7 +101,6 @@ class Server extends Model
         'grace_started_at',
         'grace_ends_at',
         'lifecycle_action_performed_at',
-        'root_password_encrypted',
         'expires_at',
         'suspended_at',
     ];
@@ -137,18 +128,17 @@ class Server extends Model
             'grace_started_at' => 'datetime',
             'grace_ends_at' => 'datetime',
             'lifecycle_action_performed_at' => 'datetime',
-            // Stored encrypted at rest; never logged or exposed.
             'root_password_encrypted' => 'encrypted',
             'expires_at' => 'datetime',
             'suspended_at' => 'datetime',
         ];
     }
 
-    /**
-     * Whether this server is billed by the hour (hourly or hourly_capped).
-     * Power state changes never alter this: billing only starts at
-     * provisioning and stops at permanent deletion.
-     */
+    public function storeRootPassword(string $password): void
+    {
+        $this->forceFill(['root_password_encrypted' => $password])->save();
+    }
+
     public function isHourlyBilling(): bool
     {
         return BillingMode::tryFrom((string) $this->billing_mode)?->isHourly() ?? false;
