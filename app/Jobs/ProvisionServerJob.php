@@ -10,7 +10,10 @@ use App\Exceptions\ProviderException;
 use App\Models\Order;
 use App\Models\Product;
 use App\Models\Provider;
+use App\Models\ProviderImage;
+use App\Models\ProviderLocation;
 use App\Models\ProviderPlan;
+use App\Models\ProviderPlanPrice;
 use App\Models\Server;
 use App\Models\Subscription;
 use App\Models\User;
@@ -42,7 +45,6 @@ class ProvisionServerJob implements ShouldQueue
         /** @var Order|null $order */
         $order = $this->order->fresh(['user', 'product.provider', 'product.providerPlan', 'items']);
 
-        // Idempotency guard: only provision paid orders that have no server yet.
         if ($order === null || $order->status !== Order::STATUS_PAID || $order->server()->exists()) {
             return;
         }
@@ -69,10 +71,6 @@ class ProvisionServerJob implements ShouldQueue
 
             $isHourly = $product->billingMode()->isHourly();
 
-            // Hourly services are prepaid: provisioning is rejected (before
-            // the provider is called and before the order state changes) when
-            // the wallet cannot cover the configured minimum prepaid balance.
-            // The initial payment is wallet funding — never a usage charge.
             if ($isHourly) {
                 $user = $order->user;
 
@@ -88,23 +86,49 @@ class ProvisionServerJob implements ShouldQueue
             $planData = $provider->plans()->where('provider_plan_id', $plan->provider_plan_id)->first()
                 ?? throw ProviderException::unavailable('Plan', $plan->provider_plan_id);
 
-            $location = $provider->locations()->where('enabled', true)->first()
-                ?? throw ProviderException::unavailable('Location', 'enabled');
+            /** @var ProviderLocation|null $location */
+            $location = $order->selected_location_id !== null
+                ? $provider->locations()->whereKey($order->selected_location_id)->where('enabled', true)->first()
+                : $provider->locations()->where('enabled', true)->first();
 
-            // Deprecated/unavailable provider images are never offered for provisioning.
-            $image = $provider->images()->where('enabled', true)->whereNull('deprecated')->first()
-                ?? throw ProviderException::unavailable('Image', 'enabled');
+            if ($location === null) {
+                throw ProviderException::unavailable('Location', (string) ($order->selected_location_id ?? 'enabled'));
+            }
 
-            // The DTOs must carry provider-facing ids (provider_plan_id,
-            // provider_location_id, provider_image_id) — never local primary keys.
+            if ($order->selected_location_id !== null) {
+                $locationAvailable = ProviderPlanPrice::query()
+                    ->where('provider_plan_id', $plan->id)
+                    ->where('provider_location_id', $location->id)
+                    ->where('deprecated', false)
+                    ->exists();
+
+                if (! $locationAvailable) {
+                    throw ProviderException::unavailable('Plan/location', $plan->provider_plan_id.'@'.$location->provider_location_id);
+                }
+            }
+
+            /** @var ProviderImage|null $image */
+            $image = $order->selected_image_id !== null
+                ? $provider->images()
+                    ->whereKey($order->selected_image_id)
+                    ->where('enabled', true)
+                    ->whereNull('deprecated')
+                    ->first()
+                : $provider->images()->where('enabled', true)->whereNull('deprecated')->first();
+
+            if ($image === null) {
+                throw ProviderException::unavailable('Image', (string) ($order->selected_image_id ?? 'enabled'));
+            }
+
+            if ($plan->architecture !== null && $image->architecture !== null && $plan->architecture !== $image->architecture) {
+                throw ProviderException::unavailable('Image architecture', $image->architecture);
+            }
+
             $planDto = ProviderPlanData::fromArray([...$planData->toArray(), 'id' => $planData->provider_plan_id]);
             $locationDto = ProviderLocationData::fromArray([...$location->toArray(), 'id' => $location->provider_location_id]);
             $imageDto = ProviderImageData::fromArray([...$image->toArray(), 'id' => $image->provider_image_id]);
 
             $serverName = Str::slug($product->name).'-'.substr($order->order_number, -6);
-
-            // Idempotency label: lets reconciliation find an already-created
-            // server if a create call was retried after an uncertain response.
             $provisioningUuid = (string) Str::uuid();
 
             $serverData = $manager->resolve($provider)->createServer(
@@ -151,9 +175,12 @@ class ProvisionServerJob implements ShouldQueue
                 'local_cost' => $cost['local_cost'] ?? null,
                 'selling_price' => $cost['selling_price'] ?? null,
                 'gross_margin' => $cost['gross_margin'] ?? null,
-                'root_password_encrypted' => $serverData->rootPassword,
                 'expires_at' => $isHourly ? null : $this->expiryFor($product->billing_cycle),
             ]);
+
+            if ($serverData->rootPassword !== null && $serverData->rootPassword !== '') {
+                $server->storeRootPassword($serverData->rootPassword);
+            }
 
             $subscription = Subscription::query()->create([
                 'user_id' => $order->user_id,
@@ -169,7 +196,6 @@ class ProvisionServerJob implements ShouldQueue
                 'monthly_cap_toman' => $product->monthly_cap_toman,
             ]);
 
-            // Hourly customer billing begins the moment provisioning succeeds.
             if ($isHourly) {
                 $billing->startBilling($server, $subscription);
             }
@@ -183,11 +209,10 @@ class ProvisionServerJob implements ShouldQueue
                 'provider_server_id' => $server->provider_server_id,
                 'ip_address' => $server->ip_address,
                 'order_number' => $order->order_number,
+                'selected_location_id' => $order->selected_location_id,
+                'selected_image_id' => $order->selected_image_id,
             ]);
         } catch (InsufficientWalletBalanceException $e) {
-            // The wallet fell below the minimum prepaid requirement. The
-            // order returns to paid so a later retry succeeds once the
-            // customer tops up. No provider call was made.
             $audit->record('provision.insufficient_balance', $order, $order->user, after: [
                 'order_number' => $order->order_number,
             ]);
@@ -232,8 +257,6 @@ class ProvisionServerJob implements ShouldQueue
     }
 
     /**
-     * Maps provider-neutral power state to application server status.
-     *
      * @return array{0: string, 1: string}
      */
     private function mapProviderState(string $providerStatus): array
