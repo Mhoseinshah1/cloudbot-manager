@@ -20,6 +20,22 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Wallet top-up safety
+    |--------------------------------------------------------------------------
+    |
+    | Free/automatic top-up is disabled by default. When explicitly enabled
+    | for development/testing, the flow still uses Order → Invoice → Payment
+    | and only auto-confirms the manual payment; it never mutates the wallet
+    | directly from the Telegram layer.
+    |
+    */
+    'allow_free_topup' => (bool) env('TELEGRAM_ALLOW_FREE_TOPUP', false),
+    'topup_gateway' => env('TELEGRAM_TOPUP_GATEWAY', 'manual'),
+    'topup_min_toman' => (int) env('TELEGRAM_TOPUP_MIN_TOMAN', 10000),
+    'topup_max_toman' => (int) env('TELEGRAM_TOPUP_MAX_TOMAN', 50000000),
+
+    /*
+    |--------------------------------------------------------------------------
     | Conversation State TTL (seconds)
     |--------------------------------------------------------------------------
     |
