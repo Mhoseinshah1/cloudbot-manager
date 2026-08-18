@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Contracts\CloudProviderInterface;
 use App\Contracts\Data\ProviderImageData;
+use App\Enums\BillingState;
 use App\Exceptions\ProviderException;
 use App\Models\Provider;
 use App\Models\Server;
@@ -11,21 +12,13 @@ use App\Models\ServerAction;
 use App\Models\User;
 use Illuminate\Auth\Access\AuthorizationException;
 use InvalidArgumentException;
+use RuntimeException;
 use Throwable;
 
-/**
- * Executes lifecycle/power actions on a server through the provider adapter.
- *
- * - authorizes local ownership before any provider call
- * - validates the provider capability before acting
- * - persists a server_actions audit record for every attempt
- * - never logs the root password; it is returned once for authorized delivery
- *
- * Deletion is only ever triggered by an explicit, authorized request — never
- * by an expiration timestamp (that is lifecycle-policy territory, Phase 5).
- */
 class ServerActionService
 {
+    public const SYSTEM_CONTEXT_BILLING_LIFECYCLE = 'billing_lifecycle';
+
     public function __construct(
         private ProviderManager $manager,
         private AuditService $audit,
@@ -35,10 +28,16 @@ class ServerActionService
     /**
      * @return array{action: ServerAction, password: ?string}
      */
-    public function perform(Server $server, string $action, ?User $actor = null, ?ProviderImageData $image = null): array
-    {
-        $this->authorize($server, $actor);
+    public function perform(
+        Server $server,
+        string $action,
+        ?User $actor = null,
+        ?ProviderImageData $image = null,
+        ?string $systemContext = null,
+    ): array {
         $this->assertKnownAction($action);
+        $this->assertActionableState($server, $action, $actor, $systemContext);
+        $this->authorize($server, $action, $actor, $systemContext);
 
         /** @var Provider|null $provider */
         $provider = $server->provider;
@@ -85,6 +84,7 @@ class ServerActionService
                 'provider_server_id' => $server->provider_server_id,
                 'action' => $action,
                 'status' => ServerAction::STATUS_COMPLETED,
+                'system_context' => $systemContext,
             ]);
 
             return ['action' => $record->fresh(), 'password' => $password];
@@ -97,16 +97,49 @@ class ServerActionService
             $this->audit->record("server.{$action}.failed", $server, $actor, after: [
                 'action' => $action,
                 'error' => $e->getMessage(),
+                'system_context' => $systemContext,
             ]);
 
             throw $e;
         }
     }
 
-    private function authorize(Server $server, ?User $actor): void
+    private function assertActionableState(Server $server, string $action, ?User $actor, ?string $systemContext): void
+    {
+        if ($server->user_id === null) {
+            throw new AuthorizationException('Server has no owner.');
+        }
+
+        if (in_array($server->status, [Server::STATUS_DELETING, Server::STATUS_DELETED], true) || $server->trashed()) {
+            throw new RuntimeException('Actions are not allowed on deleted or deleting servers.');
+        }
+
+        if ($server->status === Server::STATUS_SUSPENDED) {
+            throw new RuntimeException('Actions are not allowed on suspended servers.');
+        }
+
+        if ($server->billing_state === BillingState::LifecycleActionPending->value) {
+            $allowedLifecycleAction = $actor === null
+                && $systemContext === self::SYSTEM_CONTEXT_BILLING_LIFECYCLE
+                && in_array($action, [ServerAction::ACTION_POWER_OFF, ServerAction::ACTION_DELETE], true);
+
+            if (! $allowedLifecycleAction) {
+                throw new RuntimeException('Server has a pending lifecycle action.');
+            }
+        }
+    }
+
+    private function authorize(Server $server, string $action, ?User $actor, ?string $systemContext): void
     {
         if ($actor === null) {
-            return; // system-initiated (explicit lifecycle/reconciliation code)
+            $allowed = $systemContext === self::SYSTEM_CONTEXT_BILLING_LIFECYCLE
+                && in_array($action, [ServerAction::ACTION_POWER_OFF, ServerAction::ACTION_DELETE], true);
+
+            if (! $allowed) {
+                throw new AuthorizationException('System server action requires an explicit authorized context.');
+            }
+
+            return;
         }
 
         if ($actor->isAdmin() || $actor->id === $server->user_id) {
@@ -140,7 +173,7 @@ class ServerActionService
             ServerAction::ACTION_REBOOT => 'supportsReboot',
             ServerAction::ACTION_REBUILD => 'supportsRebuild',
             ServerAction::ACTION_RESET_PASSWORD => 'supportsResetPassword',
-            default => null, // delete is required on every adapter
+            default => null,
         };
     }
 
@@ -175,9 +208,7 @@ class ServerActionService
     private function resetPassword(CloudProviderInterface $adapter, Server $server): string
     {
         $password = $adapter->resetPassword($server->provider_server_id);
-
-        // Stored encrypted immediately; delivered once to the caller.
-        $server->update(['root_password_encrypted' => $password]);
+        $server->storeRootPassword($password);
 
         return $password;
     }
@@ -185,12 +216,8 @@ class ServerActionService
     private function delete(CloudProviderInterface $adapter, Server $server): void
     {
         $adapter->deleteServer($server->provider_server_id);
-
-        // Hourly billing stops here — the final partial hour is settled per
-        // the configured rounding policy. Power state changes never do this.
         $this->billing->stopBilling($server);
-
         $server->update(['status' => Server::STATUS_DELETED]);
-        $server->delete(); // soft delete preserves history
+        $server->delete();
     }
 }

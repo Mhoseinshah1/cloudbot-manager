@@ -13,9 +13,7 @@ return new class extends Migration
             $table->id();
             $table->foreignId('user_id')->constrained()->cascadeOnDelete();
             $table->foreignId('server_id')->constrained()->cascadeOnDelete();
-            // Threshold in hours of remaining usage (e.g. 24, 12, 6).
             $table->unsignedInteger('threshold_hours');
-            // Snapshot at warning time — integer toman, never floats.
             $table->unsignedBigInteger('balance_toman');
             $table->unsignedBigInteger('rate_toman');
             $table->unsignedInteger('estimated_hours');
@@ -24,18 +22,17 @@ return new class extends Migration
             $table->string('resolved_reason')->nullable();
             $table->timestamps();
 
-            // Deduplication: at most one unresolved warning per threshold.
-            // Only the database can authoritatively prevent duplicate warnings
-            // when the scheduler runs concurrently. Partial indexes are
-            // PostgreSQL-only (Laravel's SQLite grammar cannot emit the
-            // WHERE clause); on SQLite the service's own pre-check guards
-            // against duplicates, which is sufficient for dev/test.
-            if (DB::getDriverName() === 'pgsql') {
-                $table->unique(['server_id', 'threshold_hours'])->whereNull('resolved_at');
-            }
             $table->index(['server_id', 'resolved_at']);
             $table->index(['user_id', 'resolved_at']);
         });
+
+        if (DB::getDriverName() === 'pgsql') {
+            DB::statement(
+                'CREATE UNIQUE INDEX low_balance_warnings_unresolved_unique '
+                .'ON low_balance_warnings (server_id, threshold_hours) '
+                .'WHERE resolved_at IS NULL'
+            );
+        }
     }
 
     public function down(): void

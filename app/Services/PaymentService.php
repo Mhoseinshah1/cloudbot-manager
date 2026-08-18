@@ -95,18 +95,28 @@ class PaymentService
                     'paid_at' => now(),
                 ]);
 
-                // Hourly / hourly_capped orders fund the customer wallet; the
-                // hourly billing engine settles usage from it. Monthly orders
-                // are fully settled by this payment and do not touch wallets.
+                // Hourly VPS orders and explicit wallet top-up orders fund
+                // the customer wallet. The payment row is the idempotent
+                // financial authority; duplicate confirmations never credit
+                // the wallet twice because non-pending payments return above.
                 $order = $payment->order;
                 /** @var User|null $user */
                 $user = $payment->user;
 
-                if ($order !== null && $user !== null && BillingMode::tryFrom((string) $order->billing_mode)?->isHourly()) {
+                $fundsWallet = $order !== null && (
+                    $order->isWalletTopUp()
+                    || (BillingMode::tryFrom((string) $order->billing_mode)?->isHourly() ?? false)
+                );
+
+                if ($fundsWallet && $user !== null) {
+                    $description = $order->isWalletTopUp()
+                        ? 'Wallet top-up payment '.$order->order_number
+                        : 'Payment for order '.$order->order_number;
+
                     $this->wallets->credit(
                         $user,
                         $payment->amount_toman,
-                        'Payment for order '.$order->order_number,
+                        $description,
                         $payment,
                     );
                 }
@@ -128,6 +138,10 @@ class PaymentService
 
     public function provision(Order $order): void
     {
+        if ($order->isWalletTopUp()) {
+            throw new RuntimeException('Wallet top-up orders cannot be provisioned.');
+        }
+
         if ($order->status !== Order::STATUS_PAID) {
             throw new RuntimeException('Only paid orders can be provisioned.');
         }

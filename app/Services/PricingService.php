@@ -6,6 +6,7 @@ use App\Enums\BillingMode;
 use App\Models\Product;
 use App\Models\ProviderPlan;
 use App\Models\Setting;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -95,10 +96,6 @@ class PricingService
     }
 
     /**
-     * The amount the customer is charged at order time for the product's
-     * billing mode: the monthly price for monthly products, the hourly rate
-     * (first unit) for hourly and hourly_capped products.
-     *
      * @param  array<string, mixed>  $price
      */
     public function orderTotalToman(array $price, Product $product): int
@@ -114,11 +111,36 @@ class PricingService
         try {
             $rate = Setting::get('exchange_rate_eur_toman');
 
-            return $rate !== null ? (float) $rate : self::DEFAULT_EXCHANGE_RATE;
-        } catch (\Throwable $e) {
-            Log::debug('Could not read exchange rate setting, using default.', ['error' => $e->getMessage()]);
+            if ($rate !== null) {
+                return (float) $rate;
+            }
 
-            return self::DEFAULT_EXCHANGE_RATE;
+            $this->warnExchangeRateFallback('setting_missing');
+        } catch (\Throwable $e) {
+            $this->warnExchangeRateFallback('setting_read_failed', $e->getMessage());
+        }
+
+        return self::DEFAULT_EXCHANGE_RATE;
+    }
+
+    private function warnExchangeRateFallback(string $reason, ?string $error = null): void
+    {
+        $context = [
+            'reason' => $reason,
+            'fallback_rate' => self::DEFAULT_EXCHANGE_RATE,
+        ];
+
+        if ($error !== null) {
+            $context['error'] = $error;
+        }
+
+        Log::warning('Exchange-rate setting unavailable; using fallback rate.', $context);
+
+        // The project currently has no dedicated admin-alert transport. Emit a
+        // rate-limited critical log entry that production log monitoring can
+        // page on without flooding admins on every pricing calculation.
+        if (Cache::add('pricing:exchange-rate-fallback-admin-alert', true, now()->addHour())) {
+            Log::critical('ADMIN ALERT: fallback EUR→toman exchange rate is active.', $context);
         }
     }
 

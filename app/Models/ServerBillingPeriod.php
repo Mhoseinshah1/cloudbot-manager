@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Database\Eloquent\IntegerMoneyBuilder;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -46,6 +47,15 @@ class ServerBillingPeriod extends Model
             'amount_toman' => 'integer',
             'capped' => 'boolean',
         ];
+    }
+
+    /**
+     * @param  \Illuminate\Database\Query\Builder  $query
+     * @return IntegerMoneyBuilder<static>
+     */
+    public function newEloquentBuilder($query): IntegerMoneyBuilder
+    {
+        return new IntegerMoneyBuilder($query);
     }
 
     public function server(): BelongsTo

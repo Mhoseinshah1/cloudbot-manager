@@ -35,6 +35,11 @@ class ProviderLocation extends Model
         return $this->belongsTo(Provider::class);
     }
 
+    public function prices(): HasMany
+    {
+        return $this->hasMany(ProviderPlanPrice::class, 'provider_location_id');
+    }
+
     public function servers(): HasMany
     {
         return $this->hasMany(Server::class);

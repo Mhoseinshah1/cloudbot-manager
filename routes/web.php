@@ -9,6 +9,7 @@ Route::get('/', function () {
 });
 
 Route::post('/telegram/webhook', TelegramWebhookController::class)
+    ->middleware('throttle:60,1')
     ->name('telegram.webhook');
 
 /*
