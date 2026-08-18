@@ -7,7 +7,10 @@ use App\Models\Coupon;
 use App\Models\Invoice;
 use App\Models\Order;
 use App\Models\Product;
+use App\Models\ProviderImage;
+use App\Models\ProviderLocation;
 use App\Models\ProviderPlan;
+use App\Models\ProviderPlanPrice;
 use App\Models\User;
 use Illuminate\Support\Str;
 use RuntimeException;
@@ -21,8 +24,13 @@ class OrderService
         private ProductBillingValidator $validator,
     ) {}
 
-    public function place(User $user, Product $product, ?string $couponCode = null): Order
-    {
+    public function place(
+        User $user,
+        Product $product,
+        ?string $couponCode = null,
+        ?int $selectedLocationId = null,
+        ?int $selectedImageId = null,
+    ): Order {
         // Domain-level billing validation — invalid products are rejected
         // even when the Filament forms are bypassed.
         $this->validator->validate($product);
@@ -46,6 +54,8 @@ class OrderService
         if (! $plan instanceof ProviderPlan || ! $plan->enabled) {
             throw ProviderException::unavailable('Plan', $product->provider_plan_id ?? 'none');
         }
+
+        $this->validateProvisioningSelection($provider->id, $plan, $selectedLocationId, $selectedImageId);
 
         $price = $this->pricing->compute($plan, $product);
 
@@ -76,6 +86,8 @@ class OrderService
             'discount_toman' => $discount,
             'coupon_id' => $coupon?->id,
             'cost_snapshot' => $price,
+            'selected_location_id' => $selectedLocationId,
+            'selected_image_id' => $selectedImageId,
         ]);
 
         $order->items()->create([
@@ -95,6 +107,35 @@ class OrderService
             'order_number' => $order->order_number,
             'total_toman' => $order->total_toman,
             'product' => $product->slug,
+            'selected_location_id' => $selectedLocationId,
+            'selected_image_id' => $selectedImageId,
+        ]);
+
+        return $order;
+    }
+
+    public function createTopUpOrder(User $user, int $amountToman): Order
+    {
+        if ($amountToman <= 0) {
+            throw new RuntimeException('Top-up amount must be positive.');
+        }
+
+        $order = Order::query()->create([
+            'order_number' => 'TOPUP-'.now()->format('YmdHis').'-'.strtoupper(Str::random(6)),
+            'user_id' => $user->id,
+            'status' => Order::STATUS_PENDING,
+            'billing_mode' => 'monthly',
+            'total_toman' => $amountToman,
+            'discount_toman' => 0,
+            'cost_snapshot' => [
+                'purpose' => Order::PURPOSE_WALLET_TOPUP,
+                'amount_toman' => $amountToman,
+            ],
+        ]);
+
+        $this->audit->record('wallet.topup_order.created', $order, $user, after: [
+            'order_number' => $order->order_number,
+            'amount_toman' => $amountToman,
         ]);
 
         return $order;
@@ -110,6 +151,52 @@ class OrderService
             'amount_toman' => $order->total_toman,
             'gateway_code' => $gatewayCode,
         ]);
+    }
+
+    private function validateProvisioningSelection(
+        int $providerId,
+        ProviderPlan $plan,
+        ?int $selectedLocationId,
+        ?int $selectedImageId,
+    ): void {
+        if ($selectedLocationId !== null) {
+            $location = ProviderLocation::query()
+                ->whereKey($selectedLocationId)
+                ->where('provider_id', $providerId)
+                ->where('enabled', true)
+                ->first();
+
+            if ($location === null) {
+                throw ProviderException::unavailable('Location', (string) $selectedLocationId);
+            }
+
+            $available = ProviderPlanPrice::query()
+                ->where('provider_plan_id', $plan->id)
+                ->where('provider_location_id', $location->id)
+                ->where('deprecated', false)
+                ->exists();
+
+            if (! $available) {
+                throw ProviderException::unavailable('Plan/location', $plan->provider_plan_id.'@'.$location->provider_location_id);
+            }
+        }
+
+        if ($selectedImageId !== null) {
+            $image = ProviderImage::query()
+                ->whereKey($selectedImageId)
+                ->where('provider_id', $providerId)
+                ->where('enabled', true)
+                ->whereNull('deprecated')
+                ->first();
+
+            if ($image === null) {
+                throw ProviderException::unavailable('Image', (string) $selectedImageId);
+            }
+
+            if ($plan->architecture !== null && $image->architecture !== null && $plan->architecture !== $image->architecture) {
+                throw ProviderException::unavailable('Image architecture', $image->architecture);
+            }
+        }
     }
 
     private function resolveCoupon(string $code, int $orderTotal): Coupon
