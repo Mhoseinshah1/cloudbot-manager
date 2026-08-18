@@ -10,6 +10,7 @@ use App\Models\ProviderCredential;
 use App\Models\ProviderImage;
 use App\Models\ProviderLocation;
 use App\Models\ProviderPlan;
+use App\Models\ProviderPlanPrice;
 use App\Models\Setting;
 use App\Providers\Cloud\FakeProvider;
 use App\Services\PricingService;
@@ -85,12 +86,42 @@ class FakeProviderSeeder extends Seeder
             );
         }
 
+        // Mirror the provider catalog's plan/location availability so Telegram
+        // location filtering exercises the same ProviderPlanPrice relation as
+        // production providers. FakeProvider exposes the same sample price in
+        // each fake location.
+        $locations = ProviderLocation::query()
+            ->where('provider_id', $provider->id)
+            ->where('enabled', true)
+            ->get();
+
+        $plans = ProviderPlan::query()
+            ->where('provider_id', $provider->id)
+            ->where('enabled', true)
+            ->get();
+
+        foreach ($plans as $planModel) {
+            foreach ($locations as $locationModel) {
+                ProviderPlanPrice::query()->updateOrCreate(
+                    [
+                        'provider_plan_id' => $planModel->id,
+                        'provider_location_id' => $locationModel->id,
+                    ],
+                    [
+                        'price_hourly' => $planModel->price_hourly,
+                        'price_monthly' => $planModel->price_monthly,
+                        'currency' => $planModel->currency,
+                        'deprecated' => false,
+                    ]
+                );
+            }
+        }
+
         $plan = ProviderPlan::query()
             ->where('provider_id', $provider->id)
             ->where('provider_plan_id', 'cpx21')
             ->firstOrFail();
 
-        // Product A — monthly: 399,000 toman / month.
         $this->syncProduct($provider, $plan, [
             'slug' => 'vps-cx21',
             'name' => 'VPS CX21',
@@ -108,7 +139,6 @@ class FakeProviderSeeder extends Seeder
             ],
         ]);
 
-        // Product B — hourly: 850 toman / hour.
         $this->syncProduct($provider, $plan, [
             'slug' => 'vps-cx21-hourly',
             'name' => 'VPS CX21 Hourly',
@@ -120,7 +150,6 @@ class FakeProviderSeeder extends Seeder
             'enabled' => true,
         ]);
 
-        // Product C — hourly_capped: 850 toman / hour, 399,000 toman monthly cap.
         $this->syncProduct($provider, $plan, [
             'slug' => 'vps-cx21-capped',
             'name' => 'VPS CX21 Capped',
@@ -155,7 +184,6 @@ class FakeProviderSeeder extends Seeder
         );
 
         $mode = $product->billingMode();
-
         $price = app(PricingService::class)->compute($plan, $product);
 
         ProductPrice::query()->updateOrCreate(
