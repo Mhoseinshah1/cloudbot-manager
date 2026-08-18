@@ -54,9 +54,9 @@ class HetznerProvider implements CloudProviderInterface
             'supportsReboot' => true,
             'supportsRebuild' => true,
             'supportsResetPassword' => true,
-            'supportsSnapshots' => true, // Hetzner offers snapshots via its API
-            'supportsSuspend' => false,  // no provider-neutral suspend equivalent
-            'supportsUsage' => true,     // GET /servers/{id}/metrics?type=cpu
+            'supportsSnapshots' => true,
+            'supportsSuspend' => false,
+            'supportsUsage' => true,
         ];
     }
 
@@ -90,10 +90,9 @@ class HetznerProvider implements CloudProviderInterface
                 vcpu: (int) ($type['cores'] ?? 0),
                 ramMb: (int) round(((float) ($type['memory'] ?? 0)) * 1024),
                 diskGb: (int) ($type['disk'] ?? 0),
-                // included_traffic lives per-location on the price entries (current schema).
                 bandwidthGb: $this->bytesToGb($firstPrice['included_traffic'] ?? null),
                 priceMonthly: (float) ($firstPrice['price_monthly']['net'] ?? 0),
-                currency: 'EUR', // project currency comes from the /pricing sync
+                currency: 'EUR',
                 priceHourly: isset($firstPrice['price_hourly']['net']) ? (float) $firstPrice['price_hourly']['net'] : null,
                 description: $type['description'] ?? null,
                 metadata: [
@@ -103,7 +102,6 @@ class HetznerProvider implements CloudProviderInterface
                     'storage_type' => $type['storage_type'] ?? null,
                     'deprecated' => $type['deprecated'] ?? false,
                     'deprecation' => $type['deprecation'] ?? null,
-                    // Per-location availability (post 2025-09-24 schema).
                     'locations' => $type['locations'] ?? [],
                     'prices' => $type['prices'] ?? [],
                 ],
@@ -138,10 +136,9 @@ class HetznerProvider implements CloudProviderInterface
 
     public function getImages(): array
     {
-        // System images only; include deprecated so the sync can mark them.
         $images = $this->client()->getAll('/images', 'images', [
             'type' => 'system',
-            'include_deprecated' => 'true',
+            'include_deprecated' => true,
         ]);
 
         return array_map(fn (array $image): ProviderImageData => new ProviderImageData(
@@ -181,14 +178,8 @@ class HetznerProvider implements CloudProviderInterface
         $action = $response['action'] ?? [];
 
         $serverData = $this->normalizeServer($server);
-
-        // The root password is returned exactly once at creation. The caller
-        // must encrypt it immediately; it is never logged here.
         $serverData->rootPassword = $response['root_password'] ?? null;
 
-        // HTTP success is never treated as final provider success: when the
-        // provider reports an asynchronous create action, wait for it and
-        // then confirm the authoritative server state.
         if (isset($action['id']) && $serverData->id !== '') {
             $this->awaitAction($action, 'create_server');
 
@@ -262,8 +253,6 @@ class HetznerProvider implements CloudProviderInterface
             $cpuPercent = (float) ($last[1] ?? 0);
         }
 
-        // Hetzner metrics only cover CPU/disk/network utilization; there is no
-        // bandwidth accounting here, so bandwidthGb stays null.
         return new ProviderUsageData(
             cpuPercent: $cpuPercent,
             ramMb: 0.0,
@@ -276,10 +265,6 @@ class HetznerProvider implements CloudProviderInterface
         );
     }
 
-    /**
-     * Searches servers by a label selector — used by reconciliation to detect
-     * whether a server was already created before a create call is retried.
-     */
     public function findServerByLabel(string $key, string $value): ?ProviderServerData
     {
         $response = $this->client()->get('/servers', [
@@ -336,10 +321,6 @@ class HetznerProvider implements CloudProviderInterface
     }
 
     /**
-     * Executes a server action and waits for its provider action to reach a
-     * terminal state. Never marks an operation successful while the provider
-     * action still reports "running".
-     *
      * @param  array<string, mixed>  $payload
      */
     private function runAction(string $providerServerId, string $command, array $payload = []): ProviderActionData
@@ -350,8 +331,6 @@ class HetznerProvider implements CloudProviderInterface
     }
 
     /**
-     * Waits on an action snapshot until it reaches success/error.
-     *
      * @param  array<string, mixed>  $action
      */
     private function awaitAction(array $action, string $command): ProviderActionData
