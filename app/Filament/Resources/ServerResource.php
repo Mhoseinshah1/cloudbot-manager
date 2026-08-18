@@ -3,6 +3,7 @@
 namespace App\Filament\Resources;
 
 use App\Filament\Resources\ServerResource\Pages;
+use App\Filament\Resources\ServerResource\RelationManagers\ServerBillingPeriodRelationManager;
 use App\Models\Server;
 use App\Models\ServerAction;
 use App\Services\ServerActionService;
@@ -42,9 +43,8 @@ class ServerResource extends Resource
                     ->maxLength(255),
                 Forms\Components\TextInput::make('provider_location_id')
                     ->numeric(),
-                Forms\Components\TextInput::make('plan_snapshot'),
-                Forms\Components\FileUpload::make('image_snapshot')
-                    ->image(),
+                self::snapshotTextarea('plan_snapshot'),
+                self::snapshotTextarea('image_snapshot'),
                 Forms\Components\TextInput::make('status')
                     ->required()
                     ->maxLength(255)
@@ -70,6 +70,22 @@ class ServerResource extends Resource
                 Forms\Components\DateTimePicker::make('expires_at'),
                 Forms\Components\DateTimePicker::make('suspended_at'),
             ]);
+    }
+
+    /**
+     * Snapshot metadata is stored as JSON arrays (provider plan/image data at
+     * provisioning time). It is read-only in the admin form — never a file
+     * upload — and formatted as pretty JSON for inspection.
+     */
+    private static function snapshotTextarea(string $name): Forms\Components\Textarea
+    {
+        return Forms\Components\Textarea::make($name)
+            ->disabled()
+            ->dehydrated(false)
+            ->rows(4)
+            ->formatStateUsing(static fn ($state): ?string => is_array($state)
+                ? json_encode($state, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)
+                : $state);
     }
 
     public static function table(Table $table): Table
@@ -101,6 +117,55 @@ class ServerResource extends Resource
                     ->searchable(),
                 Tables\Columns\TextColumn::make('power_state')
                     ->searchable(),
+                Tables\Columns\TextColumn::make('billing_mode')
+                    ->badge()
+                    ->searchable(),
+                Tables\Columns\TextColumn::make('billing_state')
+                    ->badge()
+                    ->color(fn (string $state): string => match ($state) {
+                        'active' => 'success',
+                        'low_balance' => 'warning',
+                        'payment_due' => 'warning',
+                        'grace' => 'danger',
+                        default => 'gray',
+                    })
+                    ->searchable(),
+                Tables\Columns\TextColumn::make('hourly_rate_toman')
+                    ->numeric()
+                    ->sortable()
+                    ->toggleable(),
+                Tables\Columns\TextColumn::make('monthly_cap_toman')
+                    ->numeric()
+                    ->sortable()
+                    ->toggleable(isToggledHiddenByDefault: true),
+                Tables\Columns\TextColumn::make('billing_started_at')
+                    ->dateTime()
+                    ->sortable()
+                    ->toggleable(),
+                Tables\Columns\TextColumn::make('last_billed_at')
+                    ->dateTime()
+                    ->sortable()
+                    ->toggleable(),
+                Tables\Columns\TextColumn::make('billing_period_started_at')
+                    ->dateTime()
+                    ->sortable()
+                    ->toggleable(isToggledHiddenByDefault: true),
+                Tables\Columns\TextColumn::make('billing_period_ends_at')
+                    ->dateTime()
+                    ->sortable()
+                    ->toggleable(isToggledHiddenByDefault: true),
+                Tables\Columns\TextColumn::make('current_period_charged')
+                    ->numeric()
+                    ->sortable()
+                    ->toggleable(isToggledHiddenByDefault: true),
+                Tables\Columns\TextColumn::make('grace_ends_at')
+                    ->dateTime()
+                    ->sortable()
+                    ->toggleable(isToggledHiddenByDefault: true),
+                Tables\Columns\TextColumn::make('billing_stopped_at')
+                    ->dateTime()
+                    ->sortable()
+                    ->toggleable(isToggledHiddenByDefault: true),
                 Tables\Columns\TextColumn::make('provider_cost')
                     ->numeric()
                     ->sortable(),
@@ -183,7 +248,7 @@ class ServerResource extends Resource
     public static function getRelations(): array
     {
         return [
-            //
+            ServerBillingPeriodRelationManager::class,
         ];
     }
 

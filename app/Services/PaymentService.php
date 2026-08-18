@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Enums\BillingMode;
 use App\Jobs\ProvisionServerJob;
 use App\Models\Invoice;
 use App\Models\Order;
@@ -17,6 +18,7 @@ class PaymentService
     public function __construct(
         private PaymentManager $manager,
         private AuditService $audit,
+        private WalletService $wallets,
     ) {}
 
     public function start(Invoice $invoice, string $gatewayCode = 'manual'): Payment
@@ -92,6 +94,22 @@ class PaymentService
                     'gateway_code' => $payment->gateway_code,
                     'paid_at' => now(),
                 ]);
+
+                // Hourly / hourly_capped orders fund the customer wallet; the
+                // hourly billing engine settles usage from it. Monthly orders
+                // are fully settled by this payment and do not touch wallets.
+                $order = $payment->order;
+                /** @var User|null $user */
+                $user = $payment->user;
+
+                if ($order !== null && $user !== null && BillingMode::tryFrom((string) $order->billing_mode)?->isHourly()) {
+                    $this->wallets->credit(
+                        $user,
+                        $payment->amount_toman,
+                        'Payment for order '.$order->order_number,
+                        $payment,
+                    );
+                }
 
                 $this->audit->record('payment.confirmed', $payment, $actor, before: [
                     'status' => Payment::STATUS_PENDING,

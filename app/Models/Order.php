@@ -41,6 +41,7 @@ class Order extends Model
         'order_number',
         'user_id',
         'status',
+        'billing_mode',
         'total_toman',
         'discount_toman',
         'coupon_id',

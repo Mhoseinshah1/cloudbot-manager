@@ -29,6 +29,7 @@ class ServerActionService
     public function __construct(
         private ProviderManager $manager,
         private AuditService $audit,
+        private HourlyBillingService $billing,
     ) {}
 
     /**
@@ -184,6 +185,11 @@ class ServerActionService
     private function delete(CloudProviderInterface $adapter, Server $server): void
     {
         $adapter->deleteServer($server->provider_server_id);
+
+        // Hourly billing stops here — the final partial hour is settled per
+        // the configured rounding policy. Power state changes never do this.
+        $this->billing->stopBilling($server);
+
         $server->update(['status' => Server::STATUS_DELETED]);
         $server->delete(); // soft delete preserves history
     }

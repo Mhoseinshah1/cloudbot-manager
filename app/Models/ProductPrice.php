@@ -13,7 +13,10 @@ class ProductPrice extends Model
     protected $fillable = [
         'product_id',
         'billing_cycle',
+        'billing_mode',
         'price_toman',
+        'hourly_price_toman',
+        'monthly_cap_toman',
         'provider_cost',
         'provider_currency',
         'exchange_rate',
@@ -27,6 +30,8 @@ class ProductPrice extends Model
     {
         return [
             'price_toman' => 'integer',
+            'hourly_price_toman' => 'integer',
+            'monthly_cap_toman' => 'integer',
             'provider_cost' => 'decimal:2',
             'exchange_rate' => 'decimal:4',
             'local_cost' => 'integer',

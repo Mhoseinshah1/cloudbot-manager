@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Enums\BillingMode;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -23,6 +24,10 @@ class Product extends Model
 
     public const BILLING_YEARLY = 'yearly';
 
+    public const BILLING_HOURLY = 'hourly';
+
+    public const BILLING_HOURLY_CAPPED = 'hourly_capped';
+
     public const MARKUP_FIXED = 'fixed';
 
     public const MARKUP_PERCENTAGE = 'percentage';
@@ -37,9 +42,12 @@ class Product extends Model
         'description',
         'status',
         'billing_cycle',
+        'billing_mode',
         'markup_strategy',
         'markup_value',
         'price_toman',
+        'hourly_price_toman',
+        'monthly_cap_toman',
         'lifecycle_policy',
         'enabled',
     ];
@@ -49,9 +57,25 @@ class Product extends Model
         return [
             'markup_value' => 'decimal:2',
             'price_toman' => 'integer',
+            'hourly_price_toman' => 'integer',
+            'monthly_cap_toman' => 'integer',
+            'billing_mode' => BillingMode::class,
             'lifecycle_policy' => 'array',
             'enabled' => 'boolean',
         ];
+    }
+
+    /**
+     * Explicit billing mode; never inferred from provider pricing.
+     */
+    public function billingMode(): BillingMode
+    {
+        return $this->billing_mode ?? BillingMode::Monthly;
+    }
+
+    public function isHourlyBilling(): bool
+    {
+        return $this->billingMode()->isHourly();
     }
 
     public function provider(): BelongsTo

@@ -2,10 +2,12 @@
 
 namespace App\Filament\Resources;
 
+use App\Enums\BillingMode;
 use App\Filament\Resources\ProductResource\Pages;
 use App\Models\Product;
 use Filament\Forms;
 use Filament\Forms\Form;
+use Filament\Forms\Get;
 use Filament\Resources\Resource;
 use Filament\Tables;
 use Filament\Tables\Table;
@@ -36,20 +38,50 @@ class ProductResource extends Resource
                     ->required()
                     ->maxLength(255)
                     ->default('active'),
-                Forms\Components\TextInput::make('billing_cycle')
+                Forms\Components\Select::make('billing_cycle')
+                    ->options([
+                        'monthly' => 'Monthly',
+                        'quarterly' => 'Quarterly',
+                        'yearly' => 'Yearly',
+                    ])
+                    ->default('monthly')
+                    ->required(),
+                Forms\Components\Select::make('billing_mode')
+                    ->options([
+                        BillingMode::Monthly->value => 'Monthly',
+                        BillingMode::Hourly->value => 'Hourly',
+                        BillingMode::HourlyCapped->value => 'Hourly with monthly cap',
+                    ])
+                    ->default(BillingMode::Monthly->value)
                     ->required()
-                    ->maxLength(255)
-                    ->default('monthly'),
-                Forms\Components\TextInput::make('markup_strategy')
-                    ->required()
-                    ->maxLength(255)
-                    ->default('percentage'),
+                    ->helperText('Customer billing mode. Hourly modes settle usage from the customer wallet; the initial order is wallet funding, not a usage charge.'),
+                Forms\Components\Select::make('markup_strategy')
+                    ->options([
+                        'fixed' => 'Fixed toman markup',
+                        'percentage' => 'Percentage markup',
+                        'custom' => 'Custom price',
+                    ])
+                    ->default('percentage')
+                    ->required(),
                 Forms\Components\TextInput::make('markup_value')
                     ->required()
                     ->numeric()
                     ->default(0),
                 Forms\Components\TextInput::make('price_toman')
-                    ->numeric(),
+                    ->numeric()
+                    ->helperText('Explicit monthly price for the custom strategy.'),
+                Forms\Components\TextInput::make('hourly_price_toman')
+                    ->numeric()
+                    ->minValue(1)
+                    ->required(fn (Get $get): bool => in_array($get('billing_mode'), ['hourly', 'hourly_capped'], true))
+                    ->visible(fn (Get $get): bool => in_array($get('billing_mode'), ['hourly', 'hourly_capped'], true))
+                    ->helperText('Customer hourly selling price (toman per hour).'),
+                Forms\Components\TextInput::make('monthly_cap_toman')
+                    ->numeric()
+                    ->minValue(1)
+                    ->required(fn (Get $get): bool => $get('billing_mode') === 'hourly_capped')
+                    ->visible(fn (Get $get): bool => $get('billing_mode') === 'hourly_capped')
+                    ->helperText('Customer monthly cap for hourly_capped billing. Cap periods are anchored to the service start and reset only when the service billing period advances — never on calendar-month boundaries.'),
                 Forms\Components\TextInput::make('lifecycle_policy'),
                 Forms\Components\Toggle::make('enabled')
                     ->required(),
@@ -73,6 +105,9 @@ class ProductResource extends Resource
                 Tables\Columns\TextColumn::make('status')
                     ->searchable(),
                 Tables\Columns\TextColumn::make('billing_cycle')
+                    ->searchable(),
+                Tables\Columns\TextColumn::make('billing_mode')
+                    ->badge()
                     ->searchable(),
                 Tables\Columns\TextColumn::make('markup_strategy')
                     ->searchable(),

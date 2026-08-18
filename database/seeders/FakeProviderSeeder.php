@@ -2,6 +2,7 @@
 
 namespace Database\Seeders;
 
+use App\Enums\BillingMode;
 use App\Models\Product;
 use App\Models\ProductPrice;
 use App\Models\Provider;
@@ -89,33 +90,81 @@ class FakeProviderSeeder extends Seeder
             ->where('provider_plan_id', 'cpx21')
             ->firstOrFail();
 
-        $product = Product::query()->updateOrCreate(
-            ['slug' => 'vps-cx21'],
-            [
-                'provider_id' => $provider->id,
-                'provider_plan_id' => $plan->id,
-                'name' => 'VPS CX21',
-                'description' => '2 vCPU, 4 GB RAM, 80 GB SSD — 20 TB traffic.',
-                'status' => Product::STATUS_ACTIVE,
-                'billing_cycle' => Product::BILLING_MONTHLY,
-                'markup_strategy' => Product::MARKUP_PERCENTAGE,
-                'markup_value' => 15,
-                'enabled' => true,
-                'lifecycle_policy' => [
-                    'notify_days' => 7,
-                    'power_off_days' => 3,
-                    'suspend_days' => null,
-                    'delete_days' => 7,
-                ],
-            ]
+        // Product A — monthly: 399,000 toman / month.
+        $this->syncProduct($provider, $plan, [
+            'slug' => 'vps-cx21',
+            'name' => 'VPS CX21',
+            'description' => '2 vCPU, 4 GB RAM, 80 GB SSD — 20 TB traffic.',
+            'status' => Product::STATUS_ACTIVE,
+            'billing_mode' => BillingMode::Monthly->value,
+            'markup_strategy' => Product::MARKUP_PERCENTAGE,
+            'markup_value' => 15,
+            'enabled' => true,
+            'lifecycle_policy' => [
+                'notify_days' => 7,
+                'power_off_days' => 3,
+                'suspend_days' => null,
+                'delete_days' => 7,
+            ],
+        ]);
+
+        // Product B — hourly: 850 toman / hour.
+        $this->syncProduct($provider, $plan, [
+            'slug' => 'vps-cx21-hourly',
+            'name' => 'VPS CX21 Hourly',
+            'description' => '2 vCPU, 4 GB RAM, 80 GB SSD — billed by the hour.',
+            'status' => Product::STATUS_ACTIVE,
+            'billing_mode' => BillingMode::Hourly->value,
+            'hourly_price_toman' => 850,
+            'markup_strategy' => Product::MARKUP_CUSTOM,
+            'enabled' => true,
+        ]);
+
+        // Product C — hourly_capped: 850 toman / hour, 399,000 toman monthly cap.
+        $this->syncProduct($provider, $plan, [
+            'slug' => 'vps-cx21-capped',
+            'name' => 'VPS CX21 Capped',
+            'description' => '2 vCPU, 4 GB RAM, 80 GB SSD — hourly billing with a monthly cap.',
+            'status' => Product::STATUS_ACTIVE,
+            'billing_mode' => BillingMode::HourlyCapped->value,
+            'hourly_price_toman' => 850,
+            'monthly_cap_toman' => 399000,
+            'markup_strategy' => Product::MARKUP_CUSTOM,
+            'enabled' => true,
+        ]);
+
+        Setting::query()->updateOrCreate(
+            ['key' => 'exchange_rate_eur_toman'],
+            ['value' => 450000, 'group' => 'pricing']
         );
+
+        Setting::query()->updateOrCreate(
+            ['key' => 'billing.hourly_rounding'],
+            ['value' => 'ceil', 'group' => 'billing']
+        );
+    }
+
+    /**
+     * @param  array<string, mixed>  $attributes
+     */
+    private function syncProduct(Provider $provider, ProviderPlan $plan, array $attributes): void
+    {
+        $product = Product::query()->updateOrCreate(
+            ['slug' => $attributes['slug']],
+            ['provider_id' => $provider->id, 'provider_plan_id' => $plan->id, ...$attributes]
+        );
+
+        $mode = $product->billingMode();
 
         $price = app(PricingService::class)->compute($plan, $product);
 
         ProductPrice::query()->updateOrCreate(
-            ['product_id' => $product->id, 'billing_cycle' => Product::BILLING_MONTHLY],
+            ['product_id' => $product->id, 'billing_mode' => $mode->value],
             [
+                'billing_cycle' => Product::BILLING_MONTHLY,
                 'price_toman' => $price['selling_price'],
+                'hourly_price_toman' => $price['hourly_price'],
+                'monthly_cap_toman' => $price['monthly_cap'],
                 'provider_cost' => $price['provider_cost'],
                 'provider_currency' => $price['provider_currency'],
                 'exchange_rate' => $price['exchange_rate'],
@@ -123,11 +172,6 @@ class FakeProviderSeeder extends Seeder
                 'gross_margin' => $price['gross_margin'],
                 'valid_from' => now(),
             ]
-        );
-
-        Setting::query()->updateOrCreate(
-            ['key' => 'exchange_rate_eur_toman'],
-            ['value' => 450000, 'group' => 'pricing']
         );
     }
 }

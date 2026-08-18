@@ -11,6 +11,7 @@ use App\Models\Server;
 use App\Models\Subscription;
 use App\Models\User;
 use App\Services\AuditService;
+use App\Services\HourlyBillingService;
 use App\Services\OrderService;
 use App\Services\PaymentService;
 use App\Services\ProviderManager;
@@ -84,7 +85,11 @@ it('keeps the order paid and unprovisioned when the provider fails', function ()
     $job = new ProvisionServerJob($order->fresh());
 
     try {
-        $job->handle(app(ProviderManager::class), app(AuditService::class));
+        $job->handle(
+            app(ProviderManager::class),
+            app(AuditService::class),
+            app(HourlyBillingService::class),
+        );
         $this->fail('Expected a ProviderException to be thrown.');
     } catch (ProviderException) {
         // Expected.

@@ -30,6 +30,9 @@ class Subscription extends Model
         'grace_period_end',
         'price_toman',
         'billing_cycle',
+        'billing_mode',
+        'hourly_rate_toman',
+        'monthly_cap_toman',
     ];
 
     protected function casts(): array
@@ -39,6 +42,8 @@ class Subscription extends Model
             'current_period_end' => 'datetime',
             'grace_period_end' => 'datetime',
             'price_toman' => 'integer',
+            'hourly_rate_toman' => 'integer',
+            'monthly_cap_toman' => 'integer',
         ];
     }
 

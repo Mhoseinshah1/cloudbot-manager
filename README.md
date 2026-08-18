@@ -232,6 +232,39 @@ server creation (success + failure), retrieval, power/lifecycle actions, passwor
 reset, delete, rate limits, 401/404/409/422/5xx, timeouts, duplicate-provisioning
 protection, response normalization and secret redaction.
 
+## Billing core (hourly / hourly_capped)
+
+Products declare an explicit `billing_mode` — `monthly`, `hourly` or `hourly_capped`
+(`App\Enums\BillingMode`) — which is never inferred from provider catalog pricing.
+Customer prices (hourly rate, monthly cap) are platform-controlled integer toman
+values stored alongside the provider cost snapshot, so provider cost and margin are
+never exposed to customers.
+
+- **`App\Services\WalletService`** is the single authority over wallet balances:
+  every credit/debit runs in a transaction with a row lock and writes an auditable
+  `wallet_transactions` row carrying the post-mutation balance. No other code mutates
+  `wallets.balance_toman` directly.
+- **`App\Services\HourlyBillingService`** is the hourly charge engine. Billing starts
+  when a server is successfully provisioned (`billing_started_at`) and stops only on
+  permanent deletion (`billing_stopped_at`); `power_on`/`power_off`/`reboot` are
+  server actions and never start or stop billing. Charges settle from the customer
+  wallet only, in one-hour units on the server's unit grid, with a configured rounding
+  policy for partial hours (`billing.hourly_rounding`, default `ceil`).
+- **Idempotency & safety**: each server is processed under a per-server lock and a DB
+  transaction; `server_billing_periods` carries a unique `(server_id, period_start,
+  period_end)` index so an interval can never be charged twice. Unpaid intervals are
+  recorded as `unpaid` ledger rows instead of mutating the wallet.
+- **`hourly_capped`** stops charging once paid usage in the current calendar month
+  reaches the product's monthly customer cap; the cap resets at the start of the next
+  calendar month.
+- **Scheduling**: `php artisan billing:process-hourly` dispatches
+  `ProcessHourlyBillingJob` (`--sync` processes inline); the scheduler runs it hourly
+  with `withoutOverlapping`.
+
+Seed data (`FakeProviderSeeder`) ships three demo products: `vps-cx21` (monthly,
+399,000 toman), `vps-cx21-hourly` (850 toman/hour) and `vps-cx21-capped`
+(850 toman/hour, 399,000 toman/month cap).
+
 ## Environment variables
 
 `DB_CONNECTION` (pgsql), `DB_HOST`, `DB_PORT`, `DB_DATABASE`, `DB_USERNAME`,
