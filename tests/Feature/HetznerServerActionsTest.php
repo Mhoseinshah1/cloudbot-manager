@@ -108,14 +108,14 @@ it('validates provider capability before calling the provider', function () {
 
     Http::assertNothingSent();
 
-    // The action is rejected before any provider call or record is created.
     expect(ServerAction::where('server_id', $server->id)->count())->toBe(0);
 });
 
 it('requires an explicit image for rebuild', function () {
     $server = hetznerServer();
+    $owner = User::findOrFail($server->user_id);
 
-    expect(fn () => app(ServerActionService::class)->perform($server, ServerAction::ACTION_REBUILD, null))
+    expect(fn () => app(ServerActionService::class)->perform($server, ServerAction::ACTION_REBUILD, $owner))
         ->toThrow(InvalidArgumentException::class);
 
     expect(ServerAction::where('server_id', $server->id)->count())->toBe(0);
@@ -143,12 +143,11 @@ it('stores the reset password encrypted and returns it once for delivery', funct
     Http::fake(['api.hetzner.test/v1/servers/1234/actions/reset_password' => Http::response(F::resetPasswordResponse())]);
 
     $server = hetznerServer();
+    $owner = User::findOrFail($server->user_id);
 
-    $result = app(ServerActionService::class)->perform($server, ServerAction::ACTION_RESET_PASSWORD, null);
+    $result = app(ServerActionService::class)->perform($server, ServerAction::ACTION_RESET_PASSWORD, $owner);
 
     expect($result['password'])->toBe('new-ROOT-p4ssw0rd!');
-
-    // Decrypts back to the plaintext — stored encrypted at rest.
     expect($server->fresh()->root_password_encrypted)->toBe('new-ROOT-p4ssw0rd!');
 });
 
