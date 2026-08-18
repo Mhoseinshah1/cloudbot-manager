@@ -14,7 +14,6 @@ use App\Models\Subscription;
 use App\Models\User;
 use App\Models\Wallet;
 use Illuminate\Database\Eloquent\Builder;
-use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
@@ -29,18 +28,11 @@ use Illuminate\Support\Facades\DB;
  * - Charges are settled from the customer wallet through WalletService only.
  * - Every interval is recorded in server_billing_periods; the
  *   (server_id, period_start, period_end) unique index prevents double charging.
- * - Rounding of partially-consumed hours follows the configured policy
- *   (billing.hourly_rounding): ceil (default), floor or round.
- * - hourly_capped servers stop being charged once the amount paid in the
- *   current SERVICE cap period reaches the customer cap. Cap periods are
- *   anchored to the service start (start + N months, no overflow) and reset
- *   only when the service period advances — never on calendar-month changes.
- * - Minimum prepaid balance is enforced before provisioning; the initial
- *   payment is wallet funding, and the hourly ledger is the only record of
- *   actual usage charges.
+ * - Rounding of partially-consumed hours follows the configured policy.
+ * - hourly_capped periods are anchored to the service start, never calendar months.
+ * - Minimum prepaid balance is enforced before provisioning.
  * - Insufficient-balance lifecycle: active → low_balance → payment_due →
- *   grace → lifecycle_action_pending. Grace timestamps are written once and
- *   are never rewritten by repeated failed charges.
+ *   grace → lifecycle_action_pending.
  *
  * All money arithmetic uses integer toman.
  */
@@ -63,10 +55,6 @@ class HourlyBillingService
         private AuditService $audit,
     ) {}
 
-    // ------------------------------------------------------------------
-    // Configuration
-    // ------------------------------------------------------------------
-
     public function minimumPrepaidHours(): int
     {
         return max(0, (int) config('billing.hourly.minimum_prepaid_hours', 24));
@@ -87,7 +75,7 @@ class HourlyBillingService
     }
 
     /**
-     * @return array<int, int> warning thresholds in hours, descending
+     * @return array<int, int>
      */
     public function lowBalanceWarningHours(): array
     {
@@ -101,21 +89,11 @@ class HourlyBillingService
         return $values;
     }
 
-    // ------------------------------------------------------------------
-    // Minimum prepaid balance
-    // ------------------------------------------------------------------
-
     public function minimumRequiredBalance(int $hourlyRateToman): int
     {
         return $this->minimumPrepaidHours() * $hourlyRateToman;
     }
 
-    /**
-     * Wallet funding charged at order time for hourly products: enough to
-     * cover the minimum prepaid balance (minus any existing wallet balance),
-     * never less than the first hourly unit. The payment is prepayment into
-     * the wallet — actual usage is charged only by the billing ledger.
-     */
     public function fundingAmount(User $user, int $hourlyRateToman): int
     {
         $required = $this->minimumRequiredBalance($hourlyRateToman);
@@ -125,11 +103,6 @@ class HourlyBillingService
         return max($hourlyRateToman, $shortfall);
     }
 
-    /**
-     * Rejects provisioning when the wallet cannot cover the configured
-     * minimum prepaid balance. Called by ProvisionServerJob; the DB/wallet
-     * ledger remain the authority, this is the domain-level guard.
-     */
     public function assertMinimumPrepaid(User $user, int $hourlyRateToman): void
     {
         $required = $this->minimumRequiredBalance($hourlyRateToman);
@@ -141,19 +114,15 @@ class HourlyBillingService
         $balance = (int) ($user->wallet->balance_toman ?? 0);
 
         if ($balance < $required) {
-            throw InsufficientWalletBalanceException::forMinimumPrepaid($user->id, $balance, $required, $this->minimumPrepaidHours());
+            throw InsufficientWalletBalanceException::forMinimumPrepaid(
+                $user->id,
+                $balance,
+                $required,
+                $this->minimumPrepaidHours(),
+            );
         }
     }
 
-    // ------------------------------------------------------------------
-    // Billing lifecycle: start / stop
-    // ------------------------------------------------------------------
-
-    /**
-     * Opens hourly billing for a freshly provisioned server. The customer
-     * rates are snapshotted on the server at provisioning time; this method
-     * only records the lifecycle timestamps and the first service cap period.
-     */
     public function startBilling(Server $server, Subscription $subscription, ?Carbon $startedAt = null): void
     {
         if (! $server->isHourlyBilling()) {
@@ -190,15 +159,6 @@ class HourlyBillingService
         ]);
     }
 
-    /**
-     * Closes hourly billing for a permanently deleted server. Any outstanding
-     * interval (including the final partial hour) is charged according to the
-     * configured rounding policy before billing is marked as stopped.
-     *
-     * The whole operation runs in a single transaction under the server row
-     * lock, so a concurrent billing run can never charge past the stop
-     * boundary or double-charge the final interval.
-     */
     public function stopBilling(Server $server, ?Carbon $stoppedAt = null): void
     {
         if (! $server->isHourlyBilling() || $server->billing_started_at === null) {
@@ -208,10 +168,6 @@ class HourlyBillingService
         $stoppedAt ??= now();
 
         $lock = Cache::lock('hourly-billing:server:'.$server->id, 30);
-
-        // Best-effort pre-guard only: if another billing run holds the lock we
-        // still proceed, because the DB row lock below is authoritative and
-        // makes this operation idempotent and race-free.
         $acquired = $lock->get();
 
         try {
@@ -220,11 +176,10 @@ class HourlyBillingService
                 $locked = Server::query()->withTrashed()->lockForUpdate()->find($server->id);
 
                 if ($locked === null || $locked->billing_stopped_at !== null) {
-                    return; // already finalized (idempotent)
+                    return;
                 }
 
                 $this->chargeDueUnits($locked, $stoppedAt);
-
                 $locked->update(['billing_stopped_at' => $stoppedAt]);
 
                 $this->audit->record('billing.stopped', $locked, after: [
@@ -239,20 +194,12 @@ class HourlyBillingService
         }
     }
 
-    // ------------------------------------------------------------------
-    // Processing
-    // ------------------------------------------------------------------
-
-    /**
-     * Charges every server with due hourly usage. Safe to run repeatedly and
-     * concurrently; each server is processed under its own lock and the
-     * database prevents any interval from being charged twice.
-     */
     public function processDueServers(?Carbon $now = null): int
     {
         $now ??= now();
+        $recorded = 0;
 
-        $servers = Server::query()
+        Server::query()
             ->withTrashed()
             ->whereNotNull('billing_started_at')
             ->whereIn('billing_mode', [BillingMode::Hourly->value, BillingMode::HourlyCapped->value])
@@ -266,22 +213,15 @@ class HourlyBillingService
                             });
                     });
             })
-            ->get();
-
-        $recorded = 0;
-
-        foreach ($servers as $server) {
-            $recorded += $this->processServer($server, $now);
-        }
+            ->chunkById(100, function ($servers) use (&$recorded, $now) {
+                foreach ($servers as $server) {
+                    $recorded += $this->processServer($server, $now);
+                }
+            });
 
         return $recorded;
     }
 
-    /**
-     * Charges all due one-hour units for a single server, evaluates
-     * low-balance warnings and lifecycle transitions, and returns the number
-     * of billing periods recorded.
-     */
     public function processServer(Server $server, ?Carbon $now = null): int
     {
         if (! $server->isHourlyBilling() || $server->billing_started_at === null) {
@@ -289,7 +229,6 @@ class HourlyBillingService
         }
 
         $now ??= now();
-
         $lock = Cache::lock('hourly-billing:server:'.$server->id, 30);
 
         if (! $lock->get()) {
@@ -306,7 +245,6 @@ class HourlyBillingService
                 }
 
                 $recorded = $this->chargeDueUnits($locked, $now);
-
                 $this->handleGraceExpiry($locked, $now);
                 $this->evaluateLowBalanceWarnings($locked, $now);
 
@@ -316,17 +254,11 @@ class HourlyBillingService
             $lock->release();
         }
 
-        // Lifecycle actions run outside the billing transaction and after the
-        // server lock is released, so the provider call never executes under a
-        // DB row lock and never re-enters this service's own server lock.
         $this->executeLifecycleAction(Server::query()->withTrashed()->find($server->id), $now);
 
         return $recorded;
     }
 
-    /**
-     * Configured rounding policy for partially-consumed hours.
-     */
     public function roundingPolicy(): string
     {
         try {
@@ -340,10 +272,6 @@ class HourlyBillingService
         }
     }
 
-    /**
-     * End of the chargeable window for a server at the given boundary time,
-     * expressed on the server's one-hour unit grid and rounded per policy.
-     */
     public function chargeableUntil(Server $server, Carbon $boundary): Carbon
     {
         $start = Carbon::parse($server->billing_started_at);
@@ -357,15 +285,12 @@ class HourlyBillingService
         $units = match ($this->roundingPolicy()) {
             self::ROUNDING_FLOOR => intdiv($elapsedMinutes, 60),
             self::ROUNDING_ROUND => intdiv($elapsedMinutes + 30, 60),
-            default => intdiv($elapsedMinutes + 59, 60), // ceil
+            default => intdiv($elapsedMinutes + 59, 60),
         };
 
         return $start->copy()->addMinutes($units * 60);
     }
 
-    /**
-     * @return int number of billing periods recorded
-     */
     private function chargeDueUnits(Server $server, Carbon $now): int
     {
         $cursor = Carbon::parse($server->last_billed_at ?? $server->billing_started_at);
@@ -406,16 +331,6 @@ class HourlyBillingService
         return $recorded;
     }
 
-    /**
-     * Attempts to settle one billing interval.
-     *
-     * The ledger row is created first — the (server_id, period_start,
-     * period_end) unique index is the authoritative guard against duplicate
-     * intervals even when job deliveries race. The wallet debit then carries
-     * a deterministic reference back to this exact ledger row, and the row
-     * carries the wallet transaction id, so server ↔ billing period ↔ wallet
-     * transaction are all linked and auditable.
-     */
     private function chargeUnit(Server $server, Carbon $periodStart, Carbon $periodEnd, int $rate): bool
     {
         $amount = $rate;
@@ -425,7 +340,7 @@ class HourlyBillingService
             [$amount, $capped] = $this->applyCapPeriod($server, $periodStart, $amount);
 
             if ($amount <= 0) {
-                return false; // cap already reached — hour is not billed
+                return false;
             }
         }
 
@@ -435,10 +350,18 @@ class HourlyBillingService
             return false;
         }
 
-        try {
-            $period = $this->recordPeriod($server, $periodStart, $periodEnd, $rate, $amount, ServerBillingPeriod::STATUS_UNPAID, $capped);
-        } catch (UniqueConstraintViolationException) {
-            return false; // a concurrent processor already recorded this interval
+        $period = $this->recordPeriod(
+            $server,
+            $periodStart,
+            $periodEnd,
+            $rate,
+            $amount,
+            ServerBillingPeriod::STATUS_UNPAID,
+            $capped,
+        );
+
+        if ($period === null) {
+            return false;
         }
 
         $description = 'Hourly VPS usage — '.$server->name.' ('.$periodStart->format('Y-m-d H:i').' – '.$periodEnd->format('Y-m-d H:i').')';
@@ -475,8 +398,6 @@ class HourlyBillingService
             'reference_id' => $transaction->getKey(),
         ]);
 
-        // $amount is guaranteed positive here — the capped branch returned
-        // early when the cap was already reached.
         if ($server->isHourlyCappedBilling()) {
             $server->increment('current_period_charged', $amount);
         }
@@ -496,12 +417,8 @@ class HourlyBillingService
         return true;
     }
 
-    // ------------------------------------------------------------------
-    // Service-anchored cap periods (hourly_capped)
-    // ------------------------------------------------------------------
-
     /**
-     * @return array{0: int, 1: bool} [amount to charge, whether the cap was applied]
+     * @return array{0: int, 1: bool}
      */
     private function applyCapPeriod(Server $server, Carbon $unitStart, int $amount): array
     {
@@ -526,13 +443,6 @@ class HourlyBillingService
         return [$amount, false];
     }
 
-    /**
-     * Advances the service cap period while the unit start falls outside the
-     * current period, resetting the charged counter. Cap periods are anchored
-     * to the service start and use no-overflow month arithmetic, so a service
-     * that starts on Jan 31 gets a 28/29-day first period instead of rolling
-     * into March.
-     */
     private function advanceCapPeriodIfNeeded(Server $server, Carbon $unitStart): void
     {
         $periodStart = $server->billing_period_started_at !== null
@@ -568,15 +478,6 @@ class HourlyBillingService
         return $periodStart->copy()->addMonthNoOverflow();
     }
 
-    // ------------------------------------------------------------------
-    // Insufficient-balance lifecycle
-    // ------------------------------------------------------------------
-
-    /**
-     * Advances the lifecycle state on a failed charge:
-     * active → low_balance → payment_due → grace. Grace timestamps are
-     * written exactly once; repeated failures in grace never rewrite them.
-     */
     private function handleFailedCharge(Server $server): void
     {
         $state = BillingState::tryFrom((string) $server->billing_state) ?? BillingState::Active;
@@ -585,7 +486,7 @@ class HourlyBillingService
             BillingState::Active => BillingState::LowBalance,
             BillingState::LowBalance => BillingState::PaymentDue,
             BillingState::PaymentDue => BillingState::Grace,
-            default => null, // already grace / lifecycle_action_pending — no re-entry
+            default => null,
         };
 
         if ($next === null) {
@@ -620,10 +521,6 @@ class HourlyBillingService
         ]);
     }
 
-    /**
-     * A successful charge means the balance has been replenished; return the
-     * server to active and clear the grace window.
-     */
     private function recoverFromUnpaidState(Server $server): void
     {
         $state = BillingState::tryFrom((string) $server->billing_state) ?? BillingState::Active;
@@ -649,11 +546,6 @@ class HourlyBillingService
         ]);
     }
 
-    /**
-     * Moves a server from grace to lifecycle_action_pending exactly once,
-     * when its grace window has fully elapsed. Idempotent: once the state
-     * has moved on, nothing is rewritten.
-     */
     private function handleGraceExpiry(Server $server, Carbon $now): void
     {
         if ($server->billing_state !== BillingState::Grace->value) {
@@ -688,14 +580,6 @@ class HourlyBillingService
         ]);
     }
 
-    /**
-     * Executes the configured lifecycle action once the server is in
-     * lifecycle_action_pending. Runs outside the billing transaction.
-     *
-     * Note: power_off only powers the server off at the provider — it does
-     * NOT stop upstream provider billing, and customer hourly billing
-     * continues. The default policy (notify_only) never destroys data.
-     */
     private function executeLifecycleAction(?Server $server, Carbon $now): void
     {
         if ($server === null) {
@@ -707,22 +591,29 @@ class HourlyBillingService
         }
 
         if ($server->lifecycle_action_performed_at !== null) {
-            return; // idempotent — never repeat the action
+            return;
         }
 
         $action = $this->lifecycleAction();
-
-        // Resolved lazily: ServerActionService depends on this service for
-        // final billing, so constructor injection would be circular.
         $serverActions = app(ServerActionService::class);
 
         if ($action === self::LIFECYCLE_POWER_OFF) {
-            $serverActions->perform($server, 'power_off', null);
+            $serverActions->perform(
+                $server,
+                'power_off',
+                null,
+                null,
+                ServerActionService::SYSTEM_CONTEXT_BILLING_LIFECYCLE,
+            );
         } elseif ($action === self::LIFECYCLE_TERMINATE) {
-            // Full final billing + provider deletion + soft delete.
-            $serverActions->perform($server, 'delete', null);
+            $serverActions->perform(
+                $server,
+                'delete',
+                null,
+                null,
+                ServerActionService::SYSTEM_CONTEXT_BILLING_LIFECYCLE,
+            );
         }
-        // notify_only: the state itself is the notification record.
 
         Server::query()->withTrashed()->whereKey($server->id)->update(['lifecycle_action_performed_at' => $now]);
 
@@ -732,16 +623,7 @@ class HourlyBillingService
         ]);
     }
 
-    // ------------------------------------------------------------------
-    // Low-balance warnings
-    // ------------------------------------------------------------------
-
     /**
-     * Evaluates configured low-balance thresholds and creates deduplicated
-     * warning records (plus LowBalanceWarningTriggered events). When the
-     * balance is replenished above a threshold, the pending warning for that
-     * threshold is resolved so it can legitimately re-trigger later.
-     *
      * @return array<int, LowBalanceWarning>
      */
     public function evaluateLowBalanceWarnings(Server $server, ?Carbon $now = null): array
@@ -757,9 +639,6 @@ class HourlyBillingService
             return [];
         }
 
-        // Fresh read inside the billing transaction: the user->wallet
-        // relation may hold a stale pre-charge snapshot, but a direct query
-        // sees the post-charge balance on the same connection.
         $balance = (int) (Wallet::query()->where('user_id', $server->user_id)->value('balance_toman') ?? 0);
         $created = [];
 
@@ -775,25 +654,33 @@ class HourlyBillingService
 
             if ($balance < $required) {
                 if ($pending === null) {
-                    try {
-                        $warning = LowBalanceWarning::query()->create([
-                            'user_id' => $server->user_id,
-                            'server_id' => $server->id,
-                            'threshold_hours' => $thresholdHours,
-                            'balance_toman' => $balance,
-                            'rate_toman' => $rate,
-                            'estimated_hours' => intdiv($balance, $rate),
-                            'warned_at' => $now,
-                        ]);
-                    } catch (UniqueConstraintViolationException) {
-                        // A concurrent scheduler run already recorded this
-                        // threshold (partial unique index on PostgreSQL).
-                        continue;
+                    $timestamp = now();
+                    $inserted = DB::table('low_balance_warnings')->insertOrIgnore([
+                        'user_id' => $server->user_id,
+                        'server_id' => $server->id,
+                        'threshold_hours' => $thresholdHours,
+                        'balance_toman' => $balance,
+                        'rate_toman' => $rate,
+                        'estimated_hours' => intdiv($balance, $rate),
+                        'warned_at' => $now,
+                        'resolved_at' => null,
+                        'resolved_reason' => null,
+                        'created_at' => $timestamp,
+                        'updated_at' => $timestamp,
+                    ]);
+
+                    if ($inserted === 1) {
+                        $warning = LowBalanceWarning::query()
+                            ->where('server_id', $server->id)
+                            ->where('threshold_hours', $thresholdHours)
+                            ->whereNull('resolved_at')
+                            ->first();
+
+                        if ($warning !== null) {
+                            LowBalanceWarningTriggered::dispatch($warning);
+                            $created[] = $warning;
+                        }
                     }
-
-                    LowBalanceWarningTriggered::dispatch($warning);
-
-                    $created[] = $warning;
                 }
 
                 continue;
@@ -810,10 +697,6 @@ class HourlyBillingService
         return $created;
     }
 
-    // ------------------------------------------------------------------
-    // Ledger
-    // ------------------------------------------------------------------
-
     private function recordPeriod(
         Server $server,
         Carbon $periodStart,
@@ -823,8 +706,10 @@ class HourlyBillingService
         string $status,
         bool $capped,
         ?string $description = null,
-    ): ServerBillingPeriod {
-        return ServerBillingPeriod::query()->create([
+    ): ?ServerBillingPeriod {
+        $timestamp = now();
+
+        $inserted = DB::table('server_billing_periods')->insertOrIgnore([
             'server_id' => $server->id,
             'subscription_id' => $server->subscription?->id,
             'period_start' => $periodStart,
@@ -835,6 +720,18 @@ class HourlyBillingService
             'status' => $status,
             'capped' => $capped,
             'description' => $description,
+            'created_at' => $timestamp,
+            'updated_at' => $timestamp,
         ]);
+
+        if ($inserted !== 1) {
+            return null;
+        }
+
+        return ServerBillingPeriod::query()
+            ->where('server_id', $server->id)
+            ->where('period_start', $periodStart)
+            ->where('period_end', $periodEnd)
+            ->first();
     }
 }
