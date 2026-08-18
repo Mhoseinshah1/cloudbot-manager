@@ -2,72 +2,68 @@
 
 namespace App\Services\Telegram;
 
+use Illuminate\Contracts\Cache\Repository;
 use Illuminate\Support\Facades\Cache;
 
 /**
- * Short-lived Redis conversation state for Telegram flows.
+ * Short-lived cache-backed conversation state for Telegram flows.
  *
- * Stores the user's progress through buy/location/plan selection flows.
- * Expired state results in a friendly restart message — never an error.
- * Financial truth is never stored only in Redis.
+ * Production defaults to Redis so state survives across webhook requests and
+ * workers. Tests may explicitly use the array store.
  */
 class TelegramStateService
 {
     private int $ttl;
 
+    private string $store;
+
     public function __construct()
     {
-        $this->ttl = config('telegram.state_ttl', 3600);
+        $this->ttl = (int) config('telegram.state_ttl', 3600);
+        $this->store = (string) config('telegram.state_store', 'redis');
     }
 
     /**
-     * Get the current state for a Telegram user.
-     *
      * @return array<string, mixed>|null
      */
     public function get(int $telegramUserId): ?array
     {
-        $state = Cache::store('array')->get($this->key($telegramUserId));
+        $state = $this->cache()->get($this->key($telegramUserId));
 
-        if (! is_array($state)) {
-            return null;
-        }
-
-        return $state;
+        return is_array($state) ? $state : null;
     }
 
     /**
-     * Set state for a Telegram user.
-     *
      * @param  array<string, mixed>  $state
      */
     public function set(int $telegramUserId, array $state): void
     {
         $state['updated_at'] = now()->timestamp;
-
-        Cache::store('array')->put($this->key($telegramUserId), $state, $this->ttl);
+        $this->cache()->put($this->key($telegramUserId), $state, $this->ttl);
     }
 
     /**
-     * Merge partial updates into existing state.
-     *
      * @param  array<string, mixed>  $updates
      */
     public function update(int $telegramUserId, array $updates): void
     {
         $current = $this->get($telegramUserId) ?? [];
-
         $this->set($telegramUserId, array_merge($current, $updates));
     }
 
     public function clear(int $telegramUserId): void
     {
-        Cache::store('array')->forget($this->key($telegramUserId));
+        $this->cache()->forget($this->key($telegramUserId));
     }
 
     public function has(int $telegramUserId): bool
     {
         return $this->get($telegramUserId) !== null;
+    }
+
+    private function cache(): Repository
+    {
+        return Cache::store($this->store);
     }
 
     private function key(int $telegramUserId): string
