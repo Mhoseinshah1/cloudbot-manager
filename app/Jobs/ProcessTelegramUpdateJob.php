@@ -8,6 +8,8 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Cache;
+use Throwable;
 
 class ProcessTelegramUpdateJob implements ShouldQueue
 {
@@ -28,5 +30,12 @@ class ProcessTelegramUpdateJob implements ShouldQueue
     public function handle(TelegramUpdateRouter $router): void
     {
         $router->handle($this->update);
+    }
+
+    public function failed(Throwable $exception): void
+    {
+        if (isset($this->update['update_id'])) {
+            Cache::forget('tg-update:'.$this->update['update_id']);
+        }
     }
 }
