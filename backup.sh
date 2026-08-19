@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# VPS Platform — backup.sh
+# CloudBot Manager — backup.sh
 #
 # Creates a timestamped backup containing:
 #   - PostgreSQL database (pg_dump, gzip)
@@ -15,7 +15,7 @@
 #
 set -euo pipefail
 
-APP_DIR="${APP_DIR:-/opt/vps-platform}"
+APP_DIR="${APP_DIR:-/opt/cloudbot-manager}"
 BACKUP_DIR="${BACKUP_DIR:-${APP_DIR}/backups}"
 SILENT=0
 [ "${1:-}" = "--silent" ] && SILENT=1

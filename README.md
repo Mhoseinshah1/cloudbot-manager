@@ -1,11 +1,11 @@
 # VPS Platform
 
-A production-ready, multi-provider VPS selling and management platform. Customers will
+A production-ready, multi-provider VPS selling and management platform. Customers
 buy and manage servers through a Telegram bot; admins manage the platform through a
-Filament panel. **Phase 1** delivered the foundation: Laravel 12 + PostgreSQL + Redis,
-the provider/payment abstraction layer, the full database schema, Filament admin
-resources, audit logging, and an automated test suite. **Phase 2** adds the real
-Hetzner Cloud adapter (production code, fully mocked tests — no live API calls yet).
+Filament panel. The foundation delivers Laravel 12 + PostgreSQL + Redis, the
+provider/payment abstraction layer, the full database schema, Filament admin
+resources, audit logging, an automated test suite, a production Hetzner Cloud
+adapter, and the complete Telegram bot purchase/management flow with billing.
 FakeProvider and ManualGateway remain the dev/test stand-ins.
 
 ## Stack
@@ -17,20 +17,20 @@ FakeProvider and ManualGateway remain the dev/test stand-ins.
 | Cache/Queue  | Redis 7 (Docker Compose) — cache, sessions, queues, locks |
 | Admin        | Filament 3 + Tailwind CSS                          |
 | Web server   | Nginx (Docker Compose)                             |
-| Providers    | `CloudProviderInterface` → FakeProvider, HetznerProvider (mocked) |
-| Payments     | `PaymentGatewayInterface` → ManualGateway (Phase 1)|
+| Providers    | `CloudProviderInterface` → FakeProvider, HetznerProvider (mocked tests) |
+| Payments     | `PaymentGatewayInterface` → ManualGateway              |
 | Static analysis | Laravel Pint, PHPStan (+ Larastan)             |
 | Tests        | Pest                                              |
 
 ## Architecture
 
 ```
-Telegram bot (Phase 4)   ─┐
+Telegram bot              ─┐
 Filament admin ───────────┼──► Services ──► CloudProviderInterface ──► FakeProvider
-                          │                (ProviderManager)          ► HetznerProvider (Phase 2)
-                          │                                           ► VultrProvider (Phase 7)
+                          │                (ProviderManager)          ► HetznerProvider
+                          │                                           ► VultrProvider (planned)
                           └──► PaymentGatewayInterface ──► ManualGateway
-                              (PaymentManager)              ► ZarinpalGateway (Phase 5)
+                              (PaymentManager)              ► ZarinpalGateway (planned)
 ```
 
 - **`app/Contracts/CloudProviderInterface.php`** — the only way the application talks to
@@ -69,20 +69,26 @@ Filament admin ───────────┼──► Services ──► 
 - `provider_credentials` are encrypted at rest; `servers.root_password_encrypted` too.
 - `audit_logs` is append-only (`created_at` only).
 
-## Phases
+## Feature Status
 
-1. ✅ **Phase 1 — Foundation**: Laravel + Postgres + Redis + Docker Compose + Filament +
+1. ✅ **Foundation**: Laravel + Postgres + Redis + Docker Compose + Filament +
    FakeProvider + ManualGateway + schema + tests.
-2. ✅ **Phase 2 — Hetzner Cloud adapter** (this build): production adapter + API client,
-   catalog sync (locations / server types / pricing / images), server actions,
-   idempotent provisioning, normalized exceptions, fully mocked test suite.
-3. ⏳ **Phase 3 — Real Hetzner E2E validation**: a dedicated real Hetzner Project with a
+2. ✅ **Hetzner Cloud adapter**: production adapter + API client, catalog sync
+   (locations / server types / pricing / images), server actions, idempotent
+   provisioning, normalized exceptions, fully mocked test suite.
+3. ✅ **Telegram bot**: customer purchase flow (monthly / hourly / hourly_capped),
+   server management (power on/off, reboot, rebuild, reset password, delete),
+   wallet top-up, billing notifications (Persian), renewal flow.
+4. ✅ **Billing core**: hourly, hourly_capped, monthly billing modes; wallet
+   service with row-level locking; low-balance warnings; grace period and
+   lifecycle actions; PostgreSQL-safe atomic concurrency.
+5. ⏳ **Real Hetzner E2E validation**: a dedicated real Hetzner Project with a
    real low-cost VPS (no assumed Hetzner "sandbox" — validation happens against the
    live API on a real project).
-4. ⏳ **Phase 4** — Telegram bot purchase and management flow.
-5. ⏳ **Phase 5** — Billing: ManualGateway + Zarinpal, renewals, expiration, grace period.
-6. ⏳ **Phase 6** — Reconciliation jobs, concurrency hardening, Sentry.
-7. ⏳ **Phase 7** — Vultr adapter.
+6. ⏳ **Payment gateways**: Zarinpal integration (ManualGateway is the current
+   dev/test stand-in).
+7. ⏳ **Reconciliation jobs, Sentry monitoring**.
+8. ⏳ **Vultr adapter**.
 
 ## Quickstart
 
@@ -128,7 +134,7 @@ php artisan app:demo-order
 Runs the full flow — order → invoice → ManualGateway payment → queued provisioning →
 server created — and prints the resulting server details.
 
-## Hetzner Cloud integration (Phase 2)
+## Hetzner Cloud integration
 
 ### Architecture
 
@@ -254,9 +260,10 @@ never exposed to customers.
   transaction; `server_billing_periods` carries a unique `(server_id, period_start,
   period_end)` index so an interval can never be charged twice. Unpaid intervals are
   recorded as `unpaid` ledger rows instead of mutating the wallet.
-- **`hourly_capped`** stops charging once paid usage in the current calendar month
-  reaches the product's monthly customer cap; the cap resets at the start of the next
-  calendar month.
+- **`hourly_capped`** stops charging once paid usage in the current service period
+  reaches the product's monthly customer cap. The cap period is anchored to the
+  server's billing cycle, NOT calendar months. For example, a server started on
+  Aug 31 15:00 has its first cap period end on Sep 30 15:00.
 - **Scheduling**: `php artisan billing:process-hourly` dispatches
   `ProcessHourlyBillingJob` (`--sync` processes inline); the scheduler runs it hourly
   with `withoutOverlapping`.
@@ -273,7 +280,7 @@ Seed data (`FakeProviderSeeder`) ships three demo products: `vps-cx21` (monthly,
 `QUEUE_CONNECTION=redis`. `APP_LOCALES=en,fa` — supported locales (Persian RTL + English);
 `APP_CURRENCY=IRR`. `APP_KEY` — encryption key for credentials/root passwords.
 
-Phase 2+ variables: `HETZNER_API_TOKEN` (fallback only — provider credentials
+Production variables: `HETZNER_API_TOKEN` (fallback only — provider credentials
 normally live encrypted in `provider_credentials`), `TELEGRAM_BOT_TOKEN`,
 `TELEGRAM_WEBHOOK_SECRET`, `ZARINPAL_MERCHANT_ID`, `ZARINPAL_CALLBACK_URL`,
 `SENTRY_DSN`, `SENTRY_AUTH_TOKEN`.
@@ -281,23 +288,51 @@ normally live encrypted in `provider_credentials`), `TELEGRAM_BOT_TOKEN`,
 > Note: provider/payment credentials are never stored in `.env` for runtime use —
 > they belong in the encrypted `provider_credentials` table, managed via Filament.
 
-## GitHub deployment (Phase 1 foundation)
+## Ubuntu / Docker Deployment
 
-The GitHub repository is the single source of truth for the application. The
-deployment scripts target a clean Ubuntu 22.04/24.04 server running Docker
-Compose, and are safe to run repeatedly.
+The GitHub repository (`main` branch) is the single source of truth. The
+deployment scripts target Ubuntu 22.04 or 24.04 running Docker Compose, and are
+safe to run repeatedly.
+
+### Standard install (clone)
 
 ```bash
-git clone https://github.com/ORG/REPO.git /opt/vps-platform
-cd /opt/vps-platform
+git clone https://github.com/Mhoseinshah1/cloudbot-manager.git /opt/cloudbot-manager
+cd /opt/cloudbot-manager
 sudo ./install.sh
 ```
 
-Future convenience installer (once the repository is public):
+SSH alternative:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ORG/REPO/main/install.sh | sudo bash
+git clone git@github.com:Mhoseinshah1/cloudbot-manager.git /opt/cloudbot-manager
+cd /opt/cloudbot-manager
+sudo ./install.sh
 ```
+
+### One-line public installer
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Mhoseinshah1/cloudbot-manager/main/install.sh | sudo bash
+```
+
+### Configurable variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `APP_DIR` | `/opt/cloudbot-manager` | Target installation directory |
+| `APP_PORT` | `8080` | Host port for Nginx — choose a free port |
+| `DB_PASSWORD` | prompted | PostgreSQL password |
+| `INSTALL_TAG` | (empty, uses `main`) | Git tag/release to pin |
+| `SEED` | `0` | Set to `1` to seed demo data (admin@example.com) |
+
+Example with a custom port:
+
+```bash
+sudo APP_PORT=8085 ./install.sh
+```
+
+> `8085` is only an example — choose a port that is not in use on your server.
 
 ### Scripts
 
@@ -347,6 +382,6 @@ success.
 
 - No secrets in code. Credentials and root passwords are encrypted at rest with
   `APP_KEY`; the audit service and logs never receive them.
-- Every server action must pass an ownership/authorization check (Phase 4 enforces it
-  at the Telegram boundary; the `servers.user_id` ownership is modeled from Phase 1).
+- Every server action passes an ownership/authorization check enforced at the
+  Telegram boundary; `servers.user_id` is the authoritative ownership column.
 - Payment confirmation and provisioning are idempotent and protected by Redis locks.

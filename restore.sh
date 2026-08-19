@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# VPS Platform — restore.sh
+# CloudBot Manager — restore.sh
 #
 # Restores a backup produced by backup.sh:
 #   sudo ./restore.sh                     # latest backup in BACKUP_DIR
@@ -11,7 +11,7 @@
 #
 set -euo pipefail
 
-APP_DIR="${APP_DIR:-/opt/vps-platform}"
+APP_DIR="${APP_DIR:-/opt/cloudbot-manager}"
 BACKUP_DIR="${BACKUP_DIR:-${APP_DIR}/backups}"
 DB_FILE="${1:-}"
 APP_FILE="${2:-}"

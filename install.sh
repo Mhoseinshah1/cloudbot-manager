@@ -1,22 +1,18 @@
 #!/usr/bin/env bash
 #
-# VPS Platform — install.sh
+# CloudBot Manager — install.sh
 #
 # Idempotent, Git-aware installer for a clean Ubuntu server.
 #
-#   git clone https://github.com/ORG/REPO.git /opt/vps-platform
-#   cd /opt/vps-platform
+#   git clone https://github.com/Mhoseinshah1/cloudbot-manager.git /opt/cloudbot-manager
+#   cd /opt/cloudbot-manager
 #   sudo ./install.sh
-#
-# or (once the repository is public):
-#
-#   curl -fsSL https://raw.githubusercontent.com/ORG/REPO/main/install.sh | sudo bash
 #
 # Safe to run multiple times: existing data (.env, storage, PostgreSQL/Redis
 # volumes) is always preserved.
 #
 # Configuration is provided through environment variables (all optional):
-#   APP_DIR       target directory (default: /opt/vps-platform)
+#   APP_DIR       target directory (default: /opt/cloudbot-manager)
 #   GIT_REPO      repository URL used when bootstrapping from a fresh clone
 #   INSTALL_TAG   Git tag/release to pin (e.g. v1.0.0); default: main
 #   APP_PORT      host port for Nginx (default: 8080)
@@ -26,8 +22,8 @@
 #
 set -euo pipefail
 
-APP_DIR="${APP_DIR:-/opt/vps-platform}"
-GIT_REPO="${GIT_REPO:-https://github.com/ORG/REPO.git}"
+APP_DIR="${APP_DIR:-/opt/cloudbot-manager}"
+GIT_REPO="${GIT_REPO:-https://github.com/Mhoseinshah1/cloudbot-manager.git}"
 INSTALL_TAG="${INSTALL_TAG:-}"
 APP_PORT="${APP_PORT:-8080}"
 FORCE_INSTALL="${FORCE_INSTALL:-0}"

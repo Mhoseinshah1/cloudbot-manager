@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# VPS Platform — update.sh
+# CloudBot Manager — update.sh
 #
 # Updates an existing installation from its Git origin:
 #   - acquires an update lock (single updater at a time)
@@ -18,7 +18,7 @@
 #
 set -euo pipefail
 
-APP_DIR="${APP_DIR:-/opt/vps-platform}"
+APP_DIR="${APP_DIR:-/opt/cloudbot-manager}"
 INSTALL_TAG="${INSTALL_TAG:-}"
 SKIP_BACKUP="${SKIP_BACKUP:-0}"
 LOCK_FILE="${APP_DIR}/.deploy/update.lock"
