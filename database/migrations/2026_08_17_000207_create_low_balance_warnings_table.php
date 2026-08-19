@@ -24,22 +24,40 @@ return new class extends Migration
             $table->string('resolved_reason')->nullable();
             $table->timestamps();
 
-            // Deduplication: at most one unresolved warning per threshold.
-            // Only the database can authoritatively prevent duplicate warnings
-            // when the scheduler runs concurrently. Partial indexes are
-            // PostgreSQL-only (Laravel's SQLite grammar cannot emit the
-            // WHERE clause); on SQLite the service's own pre-check guards
-            // against duplicates, which is sufficient for dev/test.
-            if (DB::getDriverName() === 'pgsql') {
-                $table->unique(['server_id', 'threshold_hours'])->whereNull('resolved_at');
-            }
             $table->index(['server_id', 'resolved_at']);
             $table->index(['user_id', 'resolved_at']);
         });
+
+        // Partial unique index: at most one UNRESOLVED warning per
+        // (server_id, threshold_hours). Laravel's Schema builder cannot
+        // express WHERE clauses on indexes, so we use driver-specific DDL.
+        $driver = DB::getDriverName();
+
+        if ($driver === 'pgsql') {
+            DB::statement(
+                'CREATE UNIQUE INDEX low_balance_warnings_server_threshold_unresolved_unique '
+                .'ON low_balance_warnings (server_id, threshold_hours) '
+                .'WHERE resolved_at IS NULL'
+            );
+        } elseif ($driver === 'sqlite') {
+            DB::statement(
+                'CREATE UNIQUE INDEX low_balance_warnings_server_threshold_unresolved_unique '
+                .'ON low_balance_warnings (server_id, threshold_hours) '
+                .'WHERE resolved_at IS NULL'
+            );
+        }
     }
 
     public function down(): void
     {
+        $driver = DB::getDriverName();
+
+        if ($driver === 'pgsql' || $driver === 'sqlite') {
+            DB::statement(
+                'DROP INDEX IF EXISTS low_balance_warnings_server_threshold_unresolved_unique'
+            );
+        }
+
         Schema::dropIfExists('low_balance_warnings');
     }
 };

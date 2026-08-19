@@ -14,7 +14,6 @@ use App\Models\Subscription;
 use App\Models\User;
 use App\Models\Wallet;
 use Illuminate\Database\Eloquent\Builder;
-use Illuminate\Database\UniqueConstraintViolationException;
 use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
@@ -43,6 +42,11 @@ use Illuminate\Support\Facades\DB;
  *   are never rewritten by repeated failed charges.
  *
  * All money arithmetic uses integer toman.
+ *
+ * PostgreSQL safety: every insert that may race on a unique index uses
+ * INSERT … ON CONFLICT DO NOTHING (via Laravel's insertOrIgnore) so the
+ * surrounding PostgreSQL transaction is never aborted by a unique
+ * constraint violation (SQLSTATE[25P02]).
  */
 class HourlyBillingService
 {
@@ -435,9 +439,9 @@ class HourlyBillingService
             return false;
         }
 
-        try {
-            $period = $this->recordPeriod($server, $periodStart, $periodEnd, $rate, $amount, ServerBillingPeriod::STATUS_UNPAID, $capped);
-        } catch (UniqueConstraintViolationException) {
+        $period = $this->recordPeriod($server, $periodStart, $periodEnd, $rate, $amount, ServerBillingPeriod::STATUS_UNPAID, $capped);
+
+        if ($period === null) {
             return false; // a concurrent processor already recorded this interval
         }
 
@@ -775,25 +779,34 @@ class HourlyBillingService
 
             if ($balance < $required) {
                 if ($pending === null) {
-                    try {
-                        $warning = LowBalanceWarning::query()->create([
-                            'user_id' => $server->user_id,
-                            'server_id' => $server->id,
-                            'threshold_hours' => $thresholdHours,
-                            'balance_toman' => $balance,
-                            'rate_toman' => $rate,
-                            'estimated_hours' => intdiv($balance, $rate),
-                            'warned_at' => $now,
-                        ]);
-                    } catch (UniqueConstraintViolationException) {
-                        // A concurrent scheduler run already recorded this
-                        // threshold (partial unique index on PostgreSQL).
-                        continue;
+                    // Atomic insert: INSERT … ON CONFLICT DO NOTHING
+                    // (PostgreSQL) / INSERT OR IGNORE (SQLite). No
+                    // unique-violation exception can abort the transaction.
+                    $nowTs = $now->toDateTimeString();
+                    $inserted = DB::table('low_balance_warnings')->insertOrIgnore([
+                        'user_id' => $server->user_id,
+                        'server_id' => $server->id,
+                        'threshold_hours' => $thresholdHours,
+                        'balance_toman' => $balance,
+                        'rate_toman' => $rate,
+                        'estimated_hours' => intdiv($balance, $rate),
+                        'warned_at' => $nowTs,
+                        'created_at' => $nowTs,
+                        'updated_at' => $nowTs,
+                    ]);
+
+                    if ($inserted) {
+                        /** @var LowBalanceWarning $warning */
+                        $warning = LowBalanceWarning::query()
+                            ->where('server_id', $server->id)
+                            ->where('threshold_hours', $thresholdHours)
+                            ->whereNull('resolved_at')
+                            ->first();
+
+                        LowBalanceWarningTriggered::dispatch($warning);
+
+                        $created[] = $warning;
                     }
-
-                    LowBalanceWarningTriggered::dispatch($warning);
-
-                    $created[] = $warning;
                 }
 
                 continue;
@@ -814,6 +827,17 @@ class HourlyBillingService
     // Ledger
     // ------------------------------------------------------------------
 
+    /**
+     * Atomically insert a billing period row using INSERT … ON CONFLICT
+     * DO NOTHING (PostgreSQL) / INSERT OR IGNORE (SQLite).
+     *
+     * Returns the created ServerBillingPeriod on success (inserted = 1),
+     * or null when another worker already inserted the same
+     * (server_id, period_start, period_end) row (inserted = 0).
+     *
+     * No UniqueConstraintViolationException can fire — the surrounding
+     * PostgreSQL transaction is never aborted.
+     */
     private function recordPeriod(
         Server $server,
         Carbon $periodStart,
@@ -823,8 +847,10 @@ class HourlyBillingService
         string $status,
         bool $capped,
         ?string $description = null,
-    ): ServerBillingPeriod {
-        return ServerBillingPeriod::query()->create([
+    ): ?ServerBillingPeriod {
+        $nowTs = now()->toDateTimeString();
+
+        $inserted = DB::table('server_billing_periods')->insertOrIgnore([
             'server_id' => $server->id,
             'subscription_id' => $server->subscription?->id,
             'period_start' => $periodStart,
@@ -835,6 +861,21 @@ class HourlyBillingService
             'status' => $status,
             'capped' => $capped,
             'description' => $description,
+            'created_at' => $nowTs,
+            'updated_at' => $nowTs,
         ]);
+
+        if (! $inserted) {
+            return null;
+        }
+
+        /** @var ServerBillingPeriod $period */
+        $period = ServerBillingPeriod::query()
+            ->where('server_id', $server->id)
+            ->where('period_start', $periodStart)
+            ->where('period_end', $periodEnd)
+            ->first();
+
+        return $period;
     }
 }

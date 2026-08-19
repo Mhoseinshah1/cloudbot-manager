@@ -2,12 +2,14 @@
 
 use App\Exceptions\InsufficientWalletBalanceException;
 use App\Jobs\ProvisionServerJob;
+use App\Models\LowBalanceWarning;
 use App\Models\Order;
 use App\Models\Product;
 use App\Models\Server;
 use App\Models\ServerBillingPeriod;
 use App\Models\Setting;
 use App\Models\User;
+use App\Models\Wallet;
 use App\Models\WalletTransaction;
 use App\Services\HourlyBillingService;
 use App\Services\OrderService;
@@ -16,6 +18,7 @@ use App\Services\ServerActionService;
 use App\Services\WalletService;
 use Database\Seeders\FakeProviderSeeder;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 
 /**
  * Final completeness audit of the billing core. Each group maps to one
@@ -166,9 +169,9 @@ it('does not double charge between the order payment and hourly usage billing', 
     app(HourlyBillingService::class)->processServer($server->fresh());
 
     $wallet = $this->user->fresh()->wallet;
-    expect($wallet->transactions()->where('type', WalletTransaction::TYPE_CREDIT)->sum('amount_toman'))->toBe(850);
-    expect($wallet->transactions()->where('type', WalletTransaction::TYPE_DEBIT)->sum('amount_toman'))->toBe(850);
-    expect($server->fresh()->billingPeriods()->sum('amount_toman'))->toBe(850); // one hour, once
+    expect((int) $wallet->transactions()->where('type', WalletTransaction::TYPE_CREDIT)->sum('amount_toman'))->toBe(850);
+    expect((int) $wallet->transactions()->where('type', WalletTransaction::TYPE_DEBIT)->sum('amount_toman'))->toBe(850);
+    expect((int) $server->fresh()->billingPeriods()->sum('amount_toman'))->toBe(850); // one hour, once
     expect($wallet->balance_toman)->toBe(0);
 });
 
@@ -297,7 +300,7 @@ it('completes the full hourly lifecycle end-to-end', function () {
 
     $server = $server->fresh();
     expect($server->billingPeriods()->count())->toBe(5);
-    expect($server->billingPeriods()->sum('amount_toman'))->toBe(4250);
+    expect((int) $server->billingPeriods()->sum('amount_toman'))->toBe(4250);
     expect($server->billingPeriods()->first()->amount_toman)->toBeInt();
     expect($this->user->fresh()->wallet->balance_toman)->toBeInt();
     expect($this->user->fresh()->wallet->balance_toman)->toBe($balanceStart - 4250);
@@ -432,7 +435,7 @@ it('charges two hourly services on one wallet independently without collisions',
         ->whereIn('server_id', [$serverA->id, $serverB->id])
         ->get();
 
-    expect($periods->sum('amount_toman'))->toBe(8500);
+    expect((int) $periods->sum('amount_toman'))->toBe(8500);
     expect($periods->where('status', ServerBillingPeriod::STATUS_PAID)->count())->toBe(10);
     expect($periods->pluck('reference_id')->unique()->count())->toBe(10); // one debit per interval
 
@@ -569,4 +572,264 @@ it('has sensible billing config defaults', function () {
     ]);
     expect(config('billing.hourly.low_balance_warning_hours'))->toBeArray();
     expect(config('billing.hourly.low_balance_warning_hours'))->not->toBeEmpty();
+});
+
+// ---------------------------------------------------------------------------
+// 13. PostgreSQL-aware regression: duplicate billing interval
+// ---------------------------------------------------------------------------
+
+it('handles a pre-existing duplicate billing interval without aborting the transaction', function () {
+    $server = auditProvisionServer($this->user);
+    app(WalletService::class)->credit($this->user, 100000);
+    $startedAt = $server->billing_started_at;
+
+    // Simulate a concurrent processor that already recorded this interval.
+    ServerBillingPeriod::query()->create([
+        'server_id' => $server->id,
+        'subscription_id' => $server->subscription?->id,
+        'period_start' => $startedAt,
+        'period_end' => $startedAt->copy()->addHour(),
+        'rate_toman' => 850,
+        'amount_toman' => 850,
+        'currency' => ServerBillingPeriod::CURRENCY_IRR,
+        'status' => ServerBillingPeriod::STATUS_PAID,
+    ]);
+
+    // The pre-check in recordPeriod should detect the existing row and
+    // return null without ever hitting the unique constraint — critical
+    // on PostgreSQL where an aborted transaction makes subsequent writes
+    // in the same transaction fail with SQLSTATE[25P02].
+    Carbon::setTestNow($startedAt->copy()->addMinutes(5));
+    app(HourlyBillingService::class)->processServer($server->fresh());
+
+    $server = $server->fresh();
+    expect($server->billingPeriods()->count())->toBe(1);
+    expect($server->last_billed_at)->not->toBeNull(); // cursor advanced
+    expect($this->user->fresh()->wallet->balance_toman)->toBe(100850);
+    // No wallet debit was created for the duplicate interval.
+    expect($this->user->fresh()->wallet->transactions()->where('type', WalletTransaction::TYPE_DEBIT)->count())->toBe(0);
+
+    // Crucially, the transaction is still usable — a second call succeeds.
+    Carbon::setTestNow($startedAt->copy()->addHours(2)->addMinutes(5));
+    app(HourlyBillingService::class)->processServer($server);
+
+    expect($server->fresh()->billingPeriods()->count())->toBe(3); // 1 pre-existing + 2 new
+});
+
+// ---------------------------------------------------------------------------
+// 14. PostgreSQL-aware regression: warning lifecycle
+// ---------------------------------------------------------------------------
+
+it('resolves a warning on replenishment and creates a new one on the next dip', function () {
+    $server = auditProvisionServer($this->user);
+    $service = app(HourlyBillingService::class);
+    $startedAt = $server->billing_started_at;
+
+    // Charge the first hour — wallet empties, warnings fire.
+    Carbon::setTestNow($startedAt->copy()->addMinutes(5));
+    $service->processServer($server->fresh());
+
+    $unresolved = LowBalanceWarning::query()
+        ->where('server_id', $server->id)
+        ->unresolved()
+        ->count();
+    expect($unresolved)->toBe(3);
+
+    // Replenish — all warnings resolve.
+    app(WalletService::class)->credit($this->user, 100000);
+
+    Carbon::setTestNow($startedAt->copy()->addMinutes(10));
+    $service->processServer($server->fresh());
+
+    expect(LowBalanceWarning::query()->where('server_id', $server->id)->unresolved()->count())->toBe(0);
+
+    // Drain the balance again — a fresh unresolved warning should appear
+    // for the 24h threshold (the old one was resolved, not deleted).
+    Wallet::query()->where('user_id', $this->user->id)->update(['balance_toman' => 100]);
+
+    Carbon::setTestNow($startedAt->copy()->addMinutes(20));
+    $service->processServer($server->fresh());
+
+    $fresh24h = LowBalanceWarning::query()
+        ->where('server_id', $server->id)
+        ->where('threshold_hours', 24)
+        ->unresolved()
+        ->count();
+    expect($fresh24h)->toBe(1);
+});
+
+// ---------------------------------------------------------------------------
+// 15. PostgreSQL-aware regression: concurrent duplicate warning
+// ---------------------------------------------------------------------------
+
+it('creates at most one unresolved warning when attempted concurrently', function () {
+    $server = auditProvisionServer($this->user);
+    $service = app(HourlyBillingService::class);
+    $startedAt = $server->billing_started_at;
+
+    Carbon::setTestNow($startedAt->copy()->addMinutes(5));
+
+    // First run creates warnings.
+    $service->processServer($server->fresh());
+
+    $count = LowBalanceWarning::query()
+        ->where('server_id', $server->id)
+        ->where('threshold_hours', 24)
+        ->unresolved()
+        ->count();
+    expect($count)->toBe(1);
+
+    // Second run at the same moment should be a no-op for warnings.
+    $service->processServer($server->fresh());
+
+    $count = LowBalanceWarning::query()
+        ->where('server_id', $server->id)
+        ->where('threshold_hours', 24)
+        ->unresolved()
+        ->count();
+    expect($count)->toBe(1);
+});
+
+// ---------------------------------------------------------------------------
+// 16. Aggregate money assertions are strict integers
+// ---------------------------------------------------------------------------
+
+it('returns integer sums from aggregate queries after explicit cast', function () {
+    $server = auditProvisionServer($this->user);
+    app(WalletService::class)->credit($this->user, 100000);
+
+    // 55 minutes in = ceil(55min) = 1 unit = 850 toman
+    Carbon::setTestNow($server->billing_started_at->copy()->addMinutes(55));
+    app(HourlyBillingService::class)->processServer($server->fresh());
+
+    $sum = (int) $server->fresh()->billingPeriods()->sum('amount_toman');
+    expect($sum)->toBeInt();
+    expect($sum)->toBe(850);
+
+    $walletDebitSum = (int) $this->user->fresh()->wallet->transactions()->where('type', WalletTransaction::TYPE_DEBIT)->sum('amount_toman');
+    expect($walletDebitSum)->toBeInt();
+    expect($walletDebitSum)->toBe(850);
+});
+
+// ---------------------------------------------------------------------------
+// 17. Atomic concurrency safety — billing period
+// ---------------------------------------------------------------------------
+
+it('uses conflict-safe insert for billing periods — duplicate is silently ignored', function () {
+    $server = auditProvisionServer($this->user);
+    app(WalletService::class)->credit($this->user, 100000);
+    $startedAt = $server->billing_started_at;
+
+    $periodStart = $startedAt->copy();
+    $periodEnd = $startedAt->copy()->addHour();
+
+    // First atomic insert succeeds.
+    $inserted1 = DB::table('server_billing_periods')->insertOrIgnore([
+        'server_id' => $server->id,
+        'subscription_id' => $server->subscription?->id,
+        'period_start' => $periodStart,
+        'period_end' => $periodEnd,
+        'rate_toman' => 850,
+        'amount_toman' => 850,
+        'currency' => 'IRR',
+        'status' => 'unpaid',
+        'capped' => false,
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]);
+    expect($inserted1)->toBe(1);
+
+    // Second identical insert is silently ignored (no exception, no abort).
+    $inserted2 = DB::table('server_billing_periods')->insertOrIgnore([
+        'server_id' => $server->id,
+        'subscription_id' => $server->subscription?->id,
+        'period_start' => $periodStart,
+        'period_end' => $periodEnd,
+        'rate_toman' => 850,
+        'amount_toman' => 850,
+        'currency' => 'IRR',
+        'status' => 'unpaid',
+        'capped' => false,
+        'created_at' => now(),
+        'updated_at' => now(),
+    ]);
+    expect($inserted2)->toBe(0);
+
+    // Transaction is still usable — UPDATE succeeds.
+    DB::table('server_billing_periods')
+        ->where('server_id', $server->id)
+        ->where('period_start', $periodStart)
+        ->update(['status' => 'paid']);
+
+    // Only one billing period exists.
+    expect(ServerBillingPeriod::query()->where('server_id', $server->id)->count())->toBe(1);
+    expect(ServerBillingPeriod::query()->where('server_id', $server->id)->first()->status)->toBe('paid');
+
+    // Only one wallet debit for the interval — the billing service uses
+    // the same atomic pattern, so running processServer is also safe.
+    Carbon::setTestNow($startedAt->copy()->addMinutes(5));
+    app(HourlyBillingService::class)->processServer($server->fresh());
+
+    expect(ServerBillingPeriod::query()->where('server_id', $server->id)->count())->toBe(1);
+    expect($this->user->fresh()->wallet->transactions()->where('type', WalletTransaction::TYPE_DEBIT)->count())->toBe(0);
+    // Balance untouched — the pre-inserted row blocked the billing service.
+    expect($this->user->fresh()->wallet->balance_toman)->toBe(100850);
+});
+
+// ---------------------------------------------------------------------------
+// 18. Atomic concurrency safety — low balance warning
+// ---------------------------------------------------------------------------
+
+it('uses conflict-safe insert for warnings — duplicate is silently ignored then re-triggers after resolve', function () {
+    $server = auditProvisionServer($this->user);
+    $service = app(HourlyBillingService::class);
+    $startedAt = $server->billing_started_at;
+
+    Carbon::setTestNow($startedAt->copy()->addMinutes(5));
+    $service->processServer($server->fresh());
+
+    // Exactly one unresolved warning per threshold.
+    expect(LowBalanceWarning::query()->where('server_id', $server->id)->unresolved()->count())->toBe(3);
+
+    // Attempt a second identical insert for the same threshold — must be
+    // silently ignored (inserted = 0), no exception, no transaction abort.
+    $nowTs = now()->toDateTimeString();
+    $dupInserted = DB::table('low_balance_warnings')->insertOrIgnore([
+        'user_id' => $this->user->id,
+        'server_id' => $server->id,
+        'threshold_hours' => 24,
+        'balance_toman' => 0,
+        'rate_toman' => 850,
+        'estimated_hours' => 0,
+        'warned_at' => $nowTs,
+        'created_at' => $nowTs,
+        'updated_at' => $nowTs,
+    ]);
+    expect($dupInserted)->toBe(0);
+    expect(LowBalanceWarning::query()->where('server_id', $server->id)->unresolved()->count())->toBe(3);
+
+    // Resolve the 24h warning.
+    LowBalanceWarning::query()
+        ->where('server_id', $server->id)
+        ->where('threshold_hours', 24)
+        ->whereNull('resolved_at')
+        ->update(['resolved_at' => now(), 'resolved_reason' => 'test_resolve']);
+
+    expect(LowBalanceWarning::query()->where('server_id', $server->id)->unresolved()->count())->toBe(2);
+
+    // Now the same threshold can be inserted again (resolved_at is not NULL
+    // on the old row, so the partial unique index does not conflict).
+    $reinserted = DB::table('low_balance_warnings')->insertOrIgnore([
+        'user_id' => $this->user->id,
+        'server_id' => $server->id,
+        'threshold_hours' => 24,
+        'balance_toman' => 0,
+        'rate_toman' => 850,
+        'estimated_hours' => 0,
+        'warned_at' => $nowTs,
+        'created_at' => $nowTs,
+        'updated_at' => $nowTs,
+    ]);
+    expect($reinserted)->toBe(1);
+    expect(LowBalanceWarning::query()->where('server_id', $server->id)->unresolved()->count())->toBe(3);
 });

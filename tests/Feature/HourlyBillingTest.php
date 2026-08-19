@@ -211,7 +211,7 @@ it('stops charging at the cap and resumes when the service cap period advances',
     $periods = $server->billingPeriods()->get();
 
     expect($periods)->toHaveCount(5);
-    expect($periods->sum('amount_toman'))->toBe(4000);
+    expect((int) $periods->sum('amount_toman'))->toBe(4000);
     expect($periods->where('capped', true))->toHaveCount(1);
     expect($periods->where('capped', true)->first()->amount_toman)->toBe(600);
     expect($this->user->wallet->fresh()->balance_toman)->toBe(1000850 - 4000);
@@ -262,7 +262,7 @@ it('does not reset the cap at a calendar-month boundary while the service period
     Carbon::setTestNow('2026-08-31 20:00:00');
     app(HourlyBillingService::class)->processServer($server->fresh());
 
-    expect($server->fresh()->billingPeriods()->sum('amount_toman'))->toBe(4000);
+    expect((int) $server->fresh()->billingPeriods()->sum('amount_toman'))->toBe(4000);
     expect($server->fresh()->current_period_charged)->toBe(4000);
 
     // Calendar month changed to September, but the service cap period is
