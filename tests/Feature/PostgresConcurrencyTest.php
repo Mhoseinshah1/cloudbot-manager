@@ -40,10 +40,20 @@ beforeEach(function () {
 
 function pgNewRawPdo(): PDO
 {
+    $config = config('database.connections.pgsql');
+
+    $host = $config['host'] ?? '127.0.0.1';
+    $port = $config['port'] ?? '5432';
+    $database = $config['database'] ?? 'cloudbot_test';
+    $username = $config['username'] ?? 'postgres';
+    $password = $config['password'] ?? '';
+
+    $dsn = "pgsql:host={$host};port={$port};dbname={$database}";
+
     return new PDO(
-        'pgsql:host=127.0.0.1;port=5432;dbname=cloudbot_test',
-        'postgres_test',
-        'postgres',
+        $dsn,
+        $username,
+        $password,
         [
             PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
             PDO::ATTR_EMULATE_PREPARES => false,
@@ -298,15 +308,16 @@ PHP;
     try {
         // Launch two child processes in parallel. Both boot a fresh
         // Laravel application and call processServer() on the same server.
-        // Force PostgreSQL connection via environment so child processes
-        // use the same database as the parent test, not the .env default.
+        // Derive DB credentials from the active Laravel config so child
+        // processes use the exact same database as the parent test.
+        $pgsqlConfig = config('database.connections.pgsql');
         $childEnv = array_merge($_ENV, [
             'DB_CONNECTION' => 'pgsql',
-            'DB_HOST' => '127.0.0.1',
-            'DB_PORT' => '5432',
-            'DB_DATABASE' => 'cloudbot_test',
-            'DB_USERNAME' => 'postgres_test',
-            'DB_PASSWORD' => 'postgres',
+            'DB_HOST' => $pgsqlConfig['host'] ?? '127.0.0.1',
+            'DB_PORT' => (string) ($pgsqlConfig['port'] ?? '5432'),
+            'DB_DATABASE' => $pgsqlConfig['database'] ?? 'cloudbot_test',
+            'DB_USERNAME' => $pgsqlConfig['username'] ?? 'postgres',
+            'DB_PASSWORD' => $pgsqlConfig['password'] ?? '',
             'CACHE_STORE' => 'array',
             'QUEUE_CONNECTION' => 'sync',
         ]);
