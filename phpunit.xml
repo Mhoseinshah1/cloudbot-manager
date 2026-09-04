@@ -18,6 +18,12 @@
         <testsuite name="Integration">
             <directory>tests/Integration</directory>
         </testsuite>
+        <!-- Genuinely concurrent PostgreSQL sessions in separate OS processes.
+             Deliberately outside RefreshDatabase: a forked worker can only see
+             rows that were actually committed. -->
+        <testsuite name="Concurrency">
+            <directory>tests/Concurrency</directory>
+        </testsuite>
     </testsuites>
     <source>
         <include>

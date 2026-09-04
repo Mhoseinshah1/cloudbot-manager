@@ -30,4 +30,16 @@ final class AuditEvent
     public const TwoFactorReset = 'admin.two_factor_reset';
 
     public const SettingChanged = 'setting.changed';
+
+    public const WalletCredit = 'wallet.credit';
+
+    public const WalletDebit = 'wallet.debit';
+
+    public const WalletRefund = 'wallet.refund';
+
+    public const WalletAdjusted = 'wallet.adjusted';
+
+    public const PaymentVerified = 'payment.verified';
+
+    public const InvoiceIssued = 'invoice.issued';
 }

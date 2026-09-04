@@ -21,6 +21,7 @@ identity model exist; none of the product features do — see
   settings and an append-only audit trail
 - An admin panel behind role-based access and mandatory two-factor authentication
 - A provider abstraction with a zero-network FakeProvider and a conformance suite
+- An immutable wallet ledger, manually verified payments and invoices
 
 ## Requirements
 
@@ -198,6 +199,74 @@ getting a copy that can drift.
 **There is no Hetzner implementation yet**, and no registry entry for one: an
 entry pointing at a provider that cannot provision would be a promise the system
 could not keep.
+
+## Money
+
+Customer money is **whole Toman in a BIGINT**, held in PHP as an `int`. No
+wallet, payment or invoice amount is ever a float: binary floating point cannot
+represent these values exactly, and an accumulated rounding error in a ledger is
+indistinguishable from theft. Provider costs are a separate concept with their
+own decimal handling and never mix with these.
+
+### The wallet
+
+`WalletService` is the only thing that may change a balance. Every movement runs
+in one transaction that locks the customer's row first, writes exactly one
+immutable ledger entry, updates the balance and records an audit entry — all of
+it together, or none of it.
+
+The ledger is the truth; `users.wallet_balance_toman` is a running total kept
+beside it. Entries can never be updated or deleted, enforced by the model and
+again by PostgreSQL triggers, so the guarantee holds for code that never loads
+the model and for anyone at a `psql` prompt.
+
+A wallet never goes negative. A debit larger than the balance is refused
+outright, writing nothing; there is no overdraft.
+
+```bash
+php artisan wallet:verify-integrity
+```
+
+Checks that every balance still equals its ledger. It reports and never
+corrects: silently moving customer money to make a discrepancy disappear would
+destroy the evidence of how it arose. Exits non-zero on any mismatch.
+
+### Idempotency
+
+Every movement carries a key. Replaying it returns the movement that already
+happened. Reusing one key for a *different* operation — another customer,
+another amount, another type — fails closed rather than returning a result that
+belongs to something else.
+
+### Payments
+
+`ManualGateway` is the only gateway. Someone transfers money out of band and an
+operator confirms the bank reference.
+
+**It is not a production payment gateway, and public automated selling is not
+possible with it alone.** Every payment costs an operator's attention and a
+customer waits for one to be available. A real automated gateway is required
+before launch.
+
+Creating a payment moves nothing — a pending payment is a claim, not money. Only
+explicit verification by an account holding `payments.manage` credits the wallet,
+and it credits exactly once. Support staff cannot verify payments; accepting
+money is a finance decision. One bank reference can settle only one payment,
+enforced by a unique index rather than by an application check.
+
+Settling a payment issues exactly one invoice, numbered deterministically from
+the payment so a replay finds the same document instead of drawing a second.
+
+### Concurrency
+
+The financial guarantees are tested against genuine contention: `tests/Concurrency`
+forks real OS processes with independent PostgreSQL connections, released
+together so their transactions overlap. Those tests demonstrably fail if the row
+lock is removed. Simulated races are not accepted as proof here.
+
+```bash
+vendor/bin/pest --testsuite=Concurrency
+```
 
 ## Operational notes
 

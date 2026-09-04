@@ -22,3 +22,10 @@ pest()->extend(TestCase::class)->use(RefreshDatabase::class)->in('Integration');
 pest()->beforeEach(function (): void {
     app(PermissionRegistrar::class)->forgetCachedPermissions();
 })->in('Integration');
+
+/*
+ * Concurrency tests run real, committed transactions in forked processes, so
+ * they cannot be wrapped in RefreshDatabase: a rolled-back transaction is
+ * invisible to another process. They clean up after themselves instead.
+ */
+pest()->extend(TestCase::class)->in('Concurrency');

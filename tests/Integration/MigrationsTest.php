@@ -23,6 +23,7 @@ it('creates the identity and administration tables', function (): void {
         'users', 'telegram_accounts', 'settings', 'audit_logs', 'roles', 'permissions',
         'providers', 'provider_credentials', 'provider_locations', 'provider_plans', 'provider_images',
         'fake_provider_servers', 'fake_provider_actions',
+        'wallet_transactions', 'payments', 'invoices',
     ] as $table) {
         expect(Schema::hasTable($table))->toBeTrue("expected {$table}");
     }
@@ -34,7 +35,6 @@ it('ships no table belonging to a later phase', function (): void {
     // these here means work was pulled forward.
     $laterPhases = [
         'products', 'product_location_prices', 'exchange_rates',
-        'wallet_transactions', 'payments', 'invoices',
         'orders', 'provisioning_attempts', 'servers', 'server_actions', 'subscriptions',
         'telegram_updates', 'outbox_messages', 'notification_logs',
     ];
