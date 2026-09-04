@@ -6,8 +6,10 @@ namespace App\Provisioning;
 
 use App\Models\Order;
 use App\Provisioning\Exceptions\InvalidLockTopology;
+use Illuminate\Cache\Repository as CacheRepository;
 use Illuminate\Contracts\Cache\Factory as CacheFactory;
 use Illuminate\Contracts\Cache\Lock;
+use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Contracts\Config\Repository as Config;
 use Throwable;
 
@@ -138,8 +140,28 @@ final readonly class ProvisioningLock
         }
     }
 
+    /**
+     * The lock object for this order, from the store that can actually make one.
+     *
+     * Taken from the underlying store rather than the cache repository. The
+     * repository has no `lock()` method of its own — calls reach the store
+     * through magic forwarding — so asking it directly is a runtime hope
+     * rather than a checked call, and a store that cannot lock would fail with
+     * an undefined-method error at the worst possible moment.
+     *
+     * @throws InvalidLockTopology when the configured store cannot provide locks.
+     */
     private function lockFor(Order $order): Lock
     {
-        return $this->cache->store('locks')->lock(self::keyFor($order), $this->ttlSeconds());
+        $repository = $this->cache->store('locks');
+        $store = $repository instanceof CacheRepository ? $repository->getStore() : null;
+
+        if (! $store instanceof LockProvider) {
+            throw InvalidLockTopology::because(
+                'The locks cache store cannot provide locks, so provisioning cannot be coordinated.',
+            );
+        }
+
+        return $store->lock(self::keyFor($order), $this->ttlSeconds());
     }
 }

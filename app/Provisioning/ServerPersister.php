@@ -324,7 +324,7 @@ final readonly class ServerPersister
     /**
      * An order cannot quietly change which machine it means.
      *
-     * @throws RemoteIdentityMismatch
+     * @throws RemoteIdentityConflict
      */
     private function assertExistingMatches(Server $existing, ProviderServerData $remote): void
     {
