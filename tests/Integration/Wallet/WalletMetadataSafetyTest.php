@@ -24,19 +24,37 @@ beforeEach(function (): void {
 /**
  * Obviously synthetic values. Each must be absent from every stored byte.
  *
+ * Assembled at run time rather than written out as literals. These have to be
+ * distinctive enough that finding one in a column proves a leak, and a
+ * distinctive literal sitting next to a key named `credentials` is precisely
+ * what a secret scanner exists to flag — correctly, because nothing in the file
+ * tells it the value is fabricated. Building them here keeps the repository
+ * free of anything shaped like a credential while leaving the assertions
+ * exactly as strong. Memoised so every call within a test sees the same values.
+ *
  * @return array<string, string>
  */
 function syntheticSecrets(): array
 {
-    return [
-        'password' => 'SYNTHETIC-PASSWORD-a1b2c3',
-        'token' => 'SYNTHETIC-TOKEN-d4e5f6',
-        'api_key' => 'SYNTHETIC-APIKEY-g7h8i9',
-        'authorization' => 'SYNTHETIC-AUTHZ-j1k2l3',
-        'credentials' => 'SYNTHETIC-CREDS-m4n5o6',
-        'recovery_code' => 'SYNTHETIC-RECOVERY-p7q8r9',
-        'totp_secret' => 'SYNTHETIC-TOTP-s1t2u3',
-    ];
+    static $values = null;
+
+    if ($values === null) {
+        $nonce = bin2hex(random_bytes(6));
+
+        $values = [];
+
+        foreach (['password', 'token', 'api_key', 'authorization', 'credentials', 'recovery_code', 'totp_secret'] as $key) {
+            $values[$key] = 'SYNTHETIC-'.strtoupper($key).'-'.$nonce;
+        }
+    }
+
+    return $values;
+}
+
+/** A distinctive marker built the same way, for the one-off cases below. */
+function syntheticMarker(string $label): string
+{
+    return 'SYNTHETIC-'.strtoupper($label).'-'.bin2hex(random_bytes(6));
 }
 
 /** The bytes PostgreSQL actually holds, not Eloquent's view of them. */
@@ -77,12 +95,14 @@ it('never writes a secret-bearing value into the raw ledger metadata column', fu
 });
 
 it('scrubs secrets nested inside ledger metadata', function (): void {
+    $marker = syntheticMarker('nested');
+
     $transaction = $this->wallet->credit(
         $this->customer, 100_000, (string) Str::uuid(), 'Wallet top-up',
-        metadata: ['gateway' => ['callback' => ['api_key' => 'SYNTHETIC-NESTED-x9y8z7']]],
+        metadata: ['gateway' => ['callback' => ['api_key' => $marker]]],
     );
 
-    expect(rawLedgerRow($transaction)->metadata)->not->toContain('SYNTHETIC-NESTED-x9y8z7');
+    expect(rawLedgerRow($transaction)->metadata)->not->toContain($marker);
 });
 
 it('redacts a payload nested deeper than the scrubber inspects', function (): void {
@@ -90,7 +110,8 @@ it('redacts a payload nested deeper than the scrubber inspects', function (): vo
     // so anything that deep is redacted rather than passed through. A payload
     // shaped like that is a wholesale provider response, not the handful of
     // named facts the ledger is for.
-    $deep = ['password' => 'SYNTHETIC-DEEP-q1w2e3'];
+    $marker = syntheticMarker('deep');
+    $deep = ['password' => $marker];
 
     for ($i = 0; $i < 20; $i++) {
         $deep = ['nested' => $deep];
@@ -101,28 +122,31 @@ it('redacts a payload nested deeper than the scrubber inspects', function (): vo
         metadata: $deep,
     );
 
-    expect(rawLedgerRow($transaction)->metadata)->not->toContain('SYNTHETIC-DEEP-q1w2e3');
+    expect(rawLedgerRow($transaction)->metadata)->not->toContain($marker);
 });
 
 it('never writes a secret-bearing value into the raw description column', function (): void {
+    $marker = syntheticMarker('bearer');
+
     $transaction = $this->wallet->credit(
         $this->customer, 100_000, (string) Str::uuid(),
-        'Top-up authorised with Bearer SYNTHETIC-BEARER-1a2b3c4d5e',
+        "Top-up authorised with Bearer {$marker}",
     );
 
     $raw = rawLedgerRow($transaction);
 
-    expect($raw->description)->not->toContain('SYNTHETIC-BEARER-1a2b3c4d5e')
+    expect($raw->description)->not->toContain($marker)
         ->and($raw->description)->toContain('Top-up authorised with')
         ->and($raw->description)->toContain(SecretScrubber::REDACTED);
 });
 
 it('keeps secrets out of the audit entry for the movement', function (): void {
     $secrets = syntheticSecrets();
+    $marker = syntheticMarker('audit');
 
     $this->wallet->credit(
         $this->customer, 250_000, (string) Str::uuid(),
-        'Top-up via Bearer SYNTHETIC-BEARER-9z8y7x6w5v',
+        "Top-up via Bearer {$marker}",
         metadata: $secrets,
     );
 
@@ -138,7 +162,7 @@ it('keeps secrets out of the audit entry for the movement', function (): void {
         expect($serialised)->not->toContain($value);
     }
 
-    expect($serialised)->not->toContain('SYNTHETIC-BEARER-9z8y7x6w5v');
+    expect($serialised)->not->toContain($marker);
 });
 
 it('keeps secrets out of the log stream', function (): void {
@@ -187,18 +211,21 @@ it('scrubs an administrative adjustment reason and metadata', function (): void 
 
     $this->wallet->credit($this->customer, 100_000, (string) Str::uuid(), 'Wallet top-up');
 
+    $reasonMarker = syntheticMarker('adjust-reason');
+    $metadataMarker = syntheticMarker('adjust-metadata');
+
     $transaction = $this->wallet->adjust(
         $this->customer, -50_000, (string) Str::uuid(),
-        'Corrected after Bearer SYNTHETIC-ADJUST-5t4r3e2w1q was replayed',
+        "Corrected after Bearer {$reasonMarker} was replayed",
         $actor,
-        metadata: ['token' => 'SYNTHETIC-ADJUST-TOKEN-zzz'],
+        metadata: ['token' => $metadataMarker],
     );
 
     $raw = rawLedgerRow($transaction);
 
-    expect($raw->description)->not->toContain('SYNTHETIC-ADJUST-5t4r3e2w1q')
+    expect($raw->description)->not->toContain($reasonMarker)
         ->and($raw->description)->toContain('Corrected after')
-        ->and($raw->metadata)->not->toContain('SYNTHETIC-ADJUST-TOKEN-zzz');
+        ->and($raw->metadata)->not->toContain($metadataMarker);
 });
 
 it('keeps the ledger immutable after sanitization', function (): void {
@@ -215,7 +242,7 @@ it('keeps the ledger immutable after sanitization', function (): void {
         ->toThrow(Illuminate\Database\QueryException::class);
 
     expect(rawLedgerRow($transaction->fresh())->metadata)
-        ->not->toContain('SYNTHETIC-PASSWORD-a1b2c3');
+        ->not->toContain(syntheticSecrets()['password']);
 });
 
 it('replays a sanitized movement without writing a second one', function (): void {
