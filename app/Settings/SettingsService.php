@@ -8,8 +8,10 @@ use App\Audit\AuditEvent;
 use App\Audit\AuditRecorder;
 use App\Enums\Permission;
 use App\Enums\SettingKey;
+use App\Enums\SettingType;
 use App\Models\Setting;
 use App\Models\User;
+use App\Settings\Exceptions\InvalidSettingValue;
 use App\Settings\Exceptions\UnauthorizedSettingChange;
 use Illuminate\Support\Facades\DB;
 
@@ -82,10 +84,25 @@ final readonly class SettingsService
 
     /**
      * Store a setting. Privileged: these are the controls on the business.
+     *
+     * The value must already be the type the key declares. Nothing here
+     * converts one type to another, because the conversions PHP would apply
+     * are the dangerous ones: `"false"` is a non-empty string and therefore
+     * truthy, so coercing it would store `true` and enable selling using the
+     * word for off. A caller that has the wrong type has a bug, and the write
+     * refusing is how they find out.
+     *
+     * @param  bool|int|float|string|array<array-key, mixed>|null  $value
+     *
+     * @throws InvalidSettingValue when the value is not what the key declares.
      */
-    public function set(SettingKey $key, string|int|float|bool|null $value, User $actor): Setting
+    public function set(SettingKey $key, bool|int|float|string|array|null $value, User $actor): Setting
     {
         $this->assertMayManage($actor);
+
+        // Before the transaction opens, so a rejected write touches nothing:
+        // no row created, no row updated, no audit entry.
+        $this->assertValueMatches($key, $value);
 
         return DB::transaction(function () use ($key, $value, $actor): Setting {
             $existing = $this->find($key);
@@ -113,6 +130,48 @@ final readonly class SettingsService
 
             return $setting;
         });
+    }
+
+    /**
+     * Refuse a value that is not the type this key declares.
+     *
+     * Checked with `is_*` rather than by attempting a cast, so `1`, `"1"` and
+     * `1.0` are all refused for a boolean key instead of quietly becoming
+     * `true`. Null is allowed only where a key has no range rule of its own:
+     * clearing a setting is a legitimate act, and the readers already treat
+     * an empty value as unreadable rather than as permission.
+     *
+     * @param  bool|int|float|string|array<array-key, mixed>|null  $value
+     */
+    private function assertValueMatches(SettingKey $key, bool|int|float|string|array|null $value): void
+    {
+        if ($value === null) {
+            return;
+        }
+
+        $matches = match ($key->type()) {
+            // is_bool, not a truthiness test. This is the check that stops the
+            // string "false" from switching sales on.
+            SettingType::Boolean => is_bool($value),
+            // is_int excludes bools, which PHP would otherwise accept as 1/0,
+            // and excludes "60" and 60.0.
+            SettingType::Integer => is_int($value),
+            SettingType::Float => is_float($value) || is_int($value),
+            SettingType::String => is_string($value),
+            SettingType::Json => is_array($value),
+        };
+
+        if (! $matches) {
+            throw InvalidSettingValue::wrongType($key, $value);
+        }
+
+        // Range rules that belong to one key rather than to its type.
+        if ($key === SettingKey::FxMaxAgeMinutes && is_int($value) && $value < 0) {
+            // A negative freshness limit describes no rate at all, so every
+            // sale would stop. Better to refuse the write than to have someone
+            // discover the typo by watching sales fail.
+            throw InvalidSettingValue::outOfRange($key, 'zero or more minutes');
+        }
     }
 
     /**

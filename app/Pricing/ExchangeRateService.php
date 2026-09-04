@@ -14,6 +14,7 @@ use App\Pricing\Exceptions\InvalidExchangeRate;
 use App\Pricing\Exceptions\UnauthorizedRateChange;
 use Brick\Math\BigDecimal;
 use Brick\Math\Exception\MathException;
+use Carbon\CarbonImmutable;
 use DateTimeInterface;
 use Illuminate\Support\Carbon;
 
@@ -87,7 +88,7 @@ final readonly class ExchangeRateService
      */
     public function currentRate(string $currency, ?DateTimeInterface $at = null): ?ExchangeRate
     {
-        $at = $at === null ? Carbon::now() : Carbon::instance(Carbon::parse($at));
+        $at = self::instant($at);
 
         $rate = ExchangeRate::query()
             ->where('currency', self::normalizeCurrency($currency))
@@ -100,7 +101,31 @@ final readonly class ExchangeRateService
     }
 
     /**
-     * How old the applicable rate is, in whole minutes, or null if none applies.
+     * Whether a rate is older than the given limit. The authoritative answer.
+     *
+     * Compares two instants directly rather than measuring an elapsed duration
+     * and rounding it. Whole minutes would give a rate 60 minutes and one
+     * second old an age of 60, so at a 60-minute limit it would price sales
+     * for another 59 seconds after it expired — a grace period nobody granted.
+     *
+     * The boundary, stated once: a rate is fresh while its `effective_from` is
+     * at or after `evaluated_at − limit`, and stale as soon as it is earlier.
+     * So exactly 60:00 old is fresh at a 60-minute limit, and 60:00:01 is not.
+     */
+    public function isStale(ExchangeRate $rate, int $maxAgeMinutes, ?DateTimeInterface $at = null): bool
+    {
+        $at = self::instant($at);
+        $freshFrom = $at->subMinutes($maxAgeMinutes);
+
+        return CarbonImmutable::instance($rate->effective_from)->lessThan($freshFrom);
+    }
+
+    /**
+     * How old the applicable rate is, in whole minutes.
+     *
+     * For messages and diagnostics, where a human wants a round number.
+     * Deliberately not the freshness decision: it truncates, and truncation is
+     * exactly what made the old boundary wrong.
      *
      * Measured from `effective_from` rather than from when the row was written:
      * what matters to a customer is how long ago the number stopped being
@@ -108,12 +133,23 @@ final readonly class ExchangeRateService
      */
     public function ageInMinutes(ExchangeRate $rate, ?DateTimeInterface $at = null): int
     {
-        $at = $at === null ? Carbon::now() : Carbon::instance(Carbon::parse($at));
+        $at = self::instant($at);
 
         // Negative would mean a rate not yet in effect, which currentRate()
         // never returns; clamped so a caller cannot read a future rate as
         // impossibly fresh.
-        return max(0, (int) $rate->effective_from->diffInMinutes($at, absolute: false));
+        return max(0, (int) CarbonImmutable::instance($rate->effective_from)->diffInMinutes($at, absolute: false));
+    }
+
+    /**
+     * One moment, as an immutable value.
+     *
+     * Immutable so that a caller holding the result cannot shift the instant a
+     * decision was made by acting on the object afterwards.
+     */
+    public static function instant(?DateTimeInterface $at = null): CarbonImmutable
+    {
+        return $at === null ? CarbonImmutable::now() : CarbonImmutable::instance(Carbon::parse($at));
     }
 
     /**

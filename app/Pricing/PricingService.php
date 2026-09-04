@@ -16,8 +16,10 @@ use App\Pricing\Data\PriceQuote;
 use App\Pricing\Exceptions\SaleNotAvailable;
 use App\Settings\SettingsService;
 use Brick\Math\BigDecimal;
+use Carbon\CarbonImmutable;
 use DateTimeInterface;
-use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Log;
+use Throwable;
 
 /**
  * Decides whether a new sale may happen, and on what terms.
@@ -52,7 +54,9 @@ final readonly class PricingService
      */
     public function quoteNewSale(ProductLocationPrice $locationPrice, ?DateTimeInterface $at = null): PriceQuote
     {
-        $evaluatedAt = $at === null ? Carbon::now() : Carbon::instance(Carbon::parse($at));
+        // Immutable: the moment this decision was made is a fact about the
+        // quote, and nothing downstream may move it.
+        $evaluatedAt = ExchangeRateService::instant($at);
 
         $this->assertSalesEnabled();
 
@@ -110,7 +114,7 @@ final readonly class PricingService
             providerCurrency: $price->provider_currency,
             exchangeRateId: (int) $rate->getKey(),
             exchangeRate: (string) $rateDecimal,
-            exchangeRateEffectiveFrom: $rate->effective_from,
+            exchangeRateEffectiveFrom: CarbonImmutable::instance($rate->effective_from),
             convertedProviderCostToman: (string) $convertedCost,
             sellingPriceToman: $sellingPrice,
             grossMarginToman: (string) $grossMargin,
@@ -230,6 +234,42 @@ final readonly class PricingService
     }
 
     /**
+     * Say, once per refusal, that a rate has gone stale.
+     *
+     * The specification wants an operator told when stale FX starts blocking
+     * sales, because the sales stopping is the symptom and nobody watching a
+     * dashboard would know why. Admin alerting proper arrives with the
+     * notification phase; until then a structured log line is what exists, and
+     * it carries only identifiers and times — no credentials, no metadata, no
+     * model dump.
+     *
+     * Best effort, and deliberately so. The staleness decision is already made
+     * by the time this runs, and the refusal is thrown whatever happens here:
+     * a log sink being down is an operational problem, not a reason to sell at
+     * a rate nobody stands behind, and equally not a reason to hand the caller
+     * an infrastructure error instead of the real answer.
+     */
+    private function warnRateIsStale(
+        ExchangeRate $rate,
+        string $currency,
+        int $maxAgeMinutes,
+        CarbonImmutable $evaluatedAt,
+    ): void {
+        try {
+            Log::warning('pricing.fx_rate_stale', [
+                'currency' => $currency,
+                'exchange_rate_id' => $rate->getKey(),
+                'effective_from' => CarbonImmutable::instance($rate->effective_from)->toIso8601String(),
+                'evaluated_at' => $evaluatedAt->toIso8601String(),
+                'threshold_minutes' => $maxAgeMinutes,
+            ]);
+        } catch (Throwable) {
+            // Swallowed on purpose. The caller gets SaleNotAvailable either
+            // way; losing the warning must not change the answer.
+        }
+    }
+
+    /**
      * A sale with an unknown cost is a sale with an unknown margin.
      *
      * Refused rather than treated as zero. Zero cost would report the whole
@@ -258,7 +298,7 @@ final readonly class PricingService
      * a number invented here would be a business decision made by accident, on
      * every sale, forever.
      */
-    private function requireFreshRate(string $currency, Carbon $evaluatedAt): ExchangeRate
+    private function requireFreshRate(string $currency, CarbonImmutable $evaluatedAt): ExchangeRate
     {
         $maxAgeMinutes = $this->settings->integer(SettingKey::FxMaxAgeMinutes);
 
@@ -278,14 +318,17 @@ final readonly class PricingService
             );
         }
 
-        $age = $this->rates->ageInMinutes($rate, $evaluatedAt);
+        // The instant comparison, not a rounded age. A rate 60 minutes and one
+        // second old is past a 60-minute limit, and truncating that to 60 would
+        // keep selling for another 59 seconds on a rate nobody stands behind.
+        if ($this->rates->isStale($rate, $maxAgeMinutes, $evaluatedAt)) {
+            $this->warnRateIsStale($rate, $currency, $maxAgeMinutes, $evaluatedAt);
 
-        // Strictly greater than: a rate exactly at the threshold is still
-        // within it. The boundary is stated here so it cannot drift.
-        if ($age > $maxAgeMinutes) {
+            $age = $this->rates->ageInMinutes($rate, $evaluatedAt);
+
             throw SaleNotAvailable::because(
                 SaleRefusalReason::StaleFxRate,
-                "The {$currency} rate is {$age} minutes old; the limit is {$maxAgeMinutes}.",
+                "The {$currency} rate is about {$age} minutes old; the limit is {$maxAgeMinutes}.",
             );
         }
 

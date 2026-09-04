@@ -6,7 +6,7 @@ namespace App\Pricing\Data;
 
 use App\Enums\BillingCycle;
 use App\Enums\BillingMode;
-use Illuminate\Support\Carbon;
+use Carbon\CarbonImmutable;
 
 /**
  * What a sale would cost, and what it would earn, at one moment.
@@ -28,6 +28,13 @@ use Illuminate\Support\Carbon;
  *
  * There is nothing from a provider's API in here. No response bodies, no
  * credentials — only the identities and the numbers.
+ *
+ * The timestamps are CarbonImmutable, not Carbon. `readonly` only stops the
+ * property being reassigned; a mutable Carbon behind it could still be moved
+ * by anyone holding a reference, and `$quote->evaluatedAt->addDay()` would
+ * silently rewrite when this quote was made. A later phase records these
+ * against an order as the account of what a customer was told, so they have to
+ * be values, not objects someone can edit.
  */
 final readonly class PriceQuote
 {
@@ -47,7 +54,7 @@ final readonly class PriceQuote
         public int $exchangeRateId,
         /** Exact decimal string. */
         public string $exchangeRate,
-        public Carbon $exchangeRateEffectiveFrom,
+        public CarbonImmutable $exchangeRateEffectiveFrom,
         /** Exact decimal string: providerCost × exchangeRate, unrounded. */
         public string $convertedProviderCostToman,
         /** Whole Toman, exactly as configured. */
@@ -56,7 +63,7 @@ final readonly class PriceQuote
         public string $grossMarginToman,
         public BillingMode $billingMode,
         public BillingCycle $billingCycle,
-        public Carbon $evaluatedAt,
+        public CarbonImmutable $evaluatedAt,
     ) {}
 
     /**
