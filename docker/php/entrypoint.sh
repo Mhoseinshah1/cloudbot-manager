@@ -1,5 +1,8 @@
 #!/bin/sh
 #
+# POSIX sh, not bash: the runtime image is Alpine-based and has no bash. CI
+# still syntax-checks this with `bash -n`, and ShellCheck lints it in sh mode.
+#
 # Container entrypoint for the app, worker and scheduler containers.
 #
 # Two deliberate omissions:
