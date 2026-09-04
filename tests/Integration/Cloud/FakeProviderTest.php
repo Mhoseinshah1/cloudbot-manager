@@ -275,16 +275,117 @@ it('leaves a rebooted server running', function (): void {
     expect($provider->getServer($server->providerServerId)->powerState)->toBe(ProviderPowerState::On);
 });
 
-it('marks a deleted server deleted and frees its token', function (): void {
+it('marks a deleted server deleted and powered off', function (): void {
+    $provider = app(FakeProvider::class);
+    $server = $provider->createServer(fakeRequest());
+
+    $provider->deleteServer($server->providerServerId);
+    $after = $provider->getServer($server->providerServerId);
+
+    expect($after->status)->toBe(ProviderServerStatus::Deleted)
+        ->and($after->powerState)->toBe(ProviderPowerState::Off);
+});
+
+it('stops listing a deleted server', function (): void {
+    $provider = app(FakeProvider::class);
+    $server = $provider->createServer(fakeRequest());
+
+    $provider->deleteServer($server->providerServerId);
+
+    $ids = array_map(
+        static fn ($listed): string => $listed->providerServerId,
+        $provider->listServers(),
+    );
+
+    expect($ids)->not->toContain($server->providerServerId);
+});
+
+it('keeps the provisioning token on the deleted row', function (): void {
+    // The token is a durable correlation identity, not a lease. Releasing it
+    // would let a late retry create a replacement server for an order that was
+    // already fulfilled and terminated — and bill the customer for it.
     $token = (string) Str::uuid();
     $provider = app(FakeProvider::class);
     $server = $provider->createServer(fakeRequest($token));
 
     $provider->deleteServer($server->providerServerId);
 
-    expect($provider->getServer($server->providerServerId)->status)->toBe(ProviderServerStatus::Deleted)
-        // The token must stop pointing at a server that no longer exists.
-        ->and($provider->findByProvisioningToken($token))->toBeNull();
+    // Read the column directly rather than trusting the adapter.
+    $stored = DB::table('fake_provider_servers')
+        ->where('provider_server_id', $server->providerServerId)
+        ->value('provisioning_token');
+
+    expect($stored)->toBe($token);
+});
+
+it('still resolves a deleted server by its provisioning token', function (): void {
+    // Reconciliation asks this question to find out whether a token ever
+    // produced a server. Answering "no" once the server is gone would make a
+    // terminated order look like one that was never provisioned.
+    $token = (string) Str::uuid();
+    $provider = app(FakeProvider::class);
+    $server = $provider->createServer(fakeRequest($token));
+
+    $provider->deleteServer($server->providerServerId);
+    $found = $provider->findByProvisioningToken($token);
+
+    expect($found)->not->toBeNull()
+        ->and($found->providerServerId)->toBe($server->providerServerId)
+        ->and($found->status)->toBe(ProviderServerStatus::Deleted);
+});
+
+it('creates no replacement when the same token is retried after deletion', function (): void {
+    // The whole point of the token: one token can produce at most one server,
+    // for the life of the system.
+    $token = (string) Str::uuid();
+    $provider = app(FakeProvider::class);
+
+    $original = $provider->createServer(fakeRequest($token));
+    $provider->deleteServer($original->providerServerId);
+
+    $retried = $provider->createServer(fakeRequest($token));
+
+    expect($retried->providerServerId)->toBe($original->providerServerId)
+        // The caller learns the outcome from the status rather than being
+        // handed a new server.
+        ->and($retried->status)->toBe(ProviderServerStatus::Deleted)
+        ->and(FakeProviderServer::query()->count())->toBe(1)
+        ->and(FakeProviderServer::query()->where('provisioning_token', $token)->count())->toBe(1);
+});
+
+it('still refuses another row claiming a deleted server token', function (): void {
+    // The unique constraint has to keep holding after deletion, or concurrency
+    // could reintroduce the duplicate the application now avoids.
+    $token = (string) Str::uuid();
+    $provider = app(FakeProvider::class);
+    $server = $provider->createServer(fakeRequest($token));
+    $provider->deleteServer($server->providerServerId);
+
+    expect(fn () => FakeProviderServer::query()->create([
+        'provider_server_id' => (string) Str::ulid(),
+        'provisioning_token' => $token,
+        'name' => 'replacement',
+        'provider_plan_id' => FakeCatalog::PLAN_SMALL,
+        'provider_location_id' => FakeCatalog::LOCATION_PRIMARY,
+        'provider_image_id' => FakeCatalog::IMAGE_UBUNTU,
+        'status' => ProviderServerStatus::Active,
+        'power_state' => ProviderPowerState::On,
+    ]))->toThrow(QueryException::class);
+});
+
+it('creates a new server for a genuinely new token', function (): void {
+    // Re-provisioning is not forbidden; reusing a spent token is. A new order
+    // carries a new token and gets a new server.
+    $provider = app(FakeProvider::class);
+
+    $first = $provider->createServer(fakeRequest((string) Str::uuid()));
+    $provider->deleteServer($first->providerServerId);
+
+    $second = $provider->createServer(fakeRequest((string) Str::uuid()));
+
+    expect($second->providerServerId)->not->toBe($first->providerServerId)
+        ->and($second->status)->toBe(ProviderServerStatus::Active)
+        ->and(FakeProviderServer::query()->count())->toBe(2);
 });
 
 it('treats deleting an already deleted server as done', function (): void {

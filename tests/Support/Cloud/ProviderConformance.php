@@ -240,6 +240,54 @@ final class ProviderConformance
                 expect($ids)->not->toContain($created->providerServerId);
             });
 
+            it('creates no replacement when a token is retried after deletion', function () use ($resolve, $fixtures, $request): void {
+                // A provisioning token is a durable correlation identity, not a
+                // lease. Once it has produced a server it must never produce
+                // another, even after that server is gone: a late retry on a
+                // terminated order would otherwise hand the customer a second
+                // server and a second bill.
+                //
+                // Re-provisioning is not forbidden — it just requires a new
+                // token, which the case below covers.
+                $token = (string) Str::uuid();
+                $provider = $resolve();
+
+                $original = $provider->createServer($request($fixtures, $token));
+                $before = count($provider->listServers());
+
+                $provider->deleteServer($original->providerServerId);
+
+                $retried = $provider->createServer($request($fixtures, $token));
+
+                expect($retried->providerServerId)->toBe($original->providerServerId);
+
+                // The token must not have been re-pointed at something else.
+                $found = $provider->findByProvisioningToken($token);
+                expect($found)->not->toBeNull()
+                    ->and($found->providerServerId)->toBe($original->providerServerId);
+
+                // And no replacement appeared among the active servers.
+                $ids = array_map(
+                    static fn (ProviderServerData $server): string => $server->providerServerId,
+                    $provider->listServers(),
+                );
+
+                expect($ids)->not->toContain($original->providerServerId)
+                    ->and(count($ids))->toBeLessThan($before + 1);
+            });
+
+            it('creates a distinct server for a genuinely new token', function () use ($resolve, $fixtures, $request): void {
+                $provider = $resolve();
+
+                $first = $provider->createServer($request($fixtures));
+                $provider->deleteServer($first->providerServerId);
+
+                $second = $provider->createServer($request($fixtures));
+
+                expect($second->providerServerId)->not->toBe($first->providerServerId)
+                    ->and($second->status->exists())->toBeTrue();
+            });
+
             it('normalizes actions and can read them back', function () use ($resolve, $fixtures, $request): void {
                 $created = $resolve()->createServer($request($fixtures));
                 $action = $resolve()->deleteServer($created->providerServerId);

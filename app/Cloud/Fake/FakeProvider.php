@@ -101,14 +101,21 @@ final class FakeProvider implements CloudProviderInterface, SupportsPowerControl
      * another way of finding it, not as an error. A duplicate key here means a
      * concurrent attempt won, and its server is the right answer — creating a
      * second one would bill a customer twice for one order.
+     *
+     * "Already made" includes servers since deleted. The token is bound to the
+     * remote resource for good, so this method can create at most one server
+     * per token over the whole life of the system.
      */
     public function createServer(CreateServerRequest $request): ProviderServerData
     {
         $existing = $this->findByProvisioningToken($request->provisioningToken);
 
         if ($existing instanceof ProviderServerData) {
-            // Deliberately returned unchanged. A retry carrying different
-            // parameters must not reshape a server that already exists.
+            // Deliberately returned unchanged, including when it has since been
+            // deleted. A retry carrying different parameters must not reshape a
+            // server that already exists, and a token that has already produced
+            // a server must never produce a second one — the caller learns the
+            // outcome from the status rather than receiving a replacement.
             return $existing;
         }
 
@@ -195,6 +202,15 @@ final class FakeProvider implements CloudProviderInterface, SupportsPowerControl
     /**
      * Delete a server.
      *
+     * The row stays, marked deleted, and keeps its provisioning token. The
+     * token is a durable correlation identity, not a lease: releasing it would
+     * let a later create carrying the same token build a second server, which
+     * is exactly the duplicate the token exists to prevent. A customer whose
+     * order was already fulfilled and terminated must not be able to receive —
+     * and be billed for — a replacement because a retry arrived late.
+     *
+     * Provisioning a genuinely new server requires a genuinely new token.
+     *
      * Deleting one already deleted succeeds and records another action, the way
      * a request to remove something that is gone has already achieved what the
      * caller wanted. Failing here would leave a stuck termination that no
@@ -207,9 +223,6 @@ final class FakeProvider implements CloudProviderInterface, SupportsPowerControl
         $server->forceFill([
             'status' => ProviderServerStatus::Deleted,
             'power_state' => ProviderPowerState::Off,
-            // Freed so the token cannot keep pointing at a server that is gone,
-            // and so an order can be provisioned again if that is ever right.
-            'provisioning_token' => null,
         ])->save();
 
         return $this->recordAction('delete', $providerServerId);
