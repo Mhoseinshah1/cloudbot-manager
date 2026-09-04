@@ -11,10 +11,15 @@ use App\Models\User;
 use App\Support\Queues;
 use App\Telegram\TelegramUpdateNormalizer;
 use App\Telegram\TelegramUpdateRecorder;
+use Illuminate\Cache\Repository;
+use Illuminate\Contracts\Cache\Lock;
+use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Http\Client\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
+use Tests\Support\Cache\LocklessStore;
 
 /**
  * Handling one update, on the interactive worker.
@@ -396,4 +401,117 @@ it('runs on the telegram queue and nowhere else', function (): void {
         ->and(ProcessTelegramUpdateJob::queueName())->toBe('telegram');
 
     Queue::clear(Queues::Telegram->value);
+});
+
+/**
+ * The lock this job really uses: the configured `locks` store, the real key.
+ *
+ * Built the same checked way the job builds it, so a test that holds this lock
+ * is genuinely contending with the job rather than with a lookalike.
+ */
+function telegramUpdateLock(TelegramUpdate $update): Lock
+{
+    $store = Cache::store('locks')->getStore();
+
+    expect($store)->toBeInstanceOf(LockProvider::class);
+
+    return $store->lock('telegram:update:'.$update->getKey(), 30);
+}
+
+/** A queue job that expects to be released once, for exactly this long. */
+function releasableJob(int $seconds): Illuminate\Contracts\Queue\Job
+{
+    $queueJob = Mockery::mock(Illuminate\Contracts\Queue\Job::class);
+    $queueJob->shouldReceive('release')->once()->with($seconds);
+    $queueJob->shouldReceive('getJobId')->andReturn('1');
+    $queueJob->shouldReceive('hasFailed')->andReturnFalse();
+    $queueJob->shouldReceive('isReleased')->andReturnTrue();
+    $queueJob->shouldReceive('isDeleted')->andReturnFalse();
+    $queueJob->shouldReceive('isDeletedOrReleased')->andReturnTrue();
+
+    return $queueJob;
+}
+
+it('stands aside while another worker holds the update', function (): void {
+    telegramOk();
+    $update = recordUpdate(startPayload(701400));
+
+    // Somebody else got there first, in the real locks store.
+    $held = telegramUpdateLock($update);
+
+    expect($held->get())->toBeTrue();
+
+    $job = new ProcessTelegramUpdateJob((int) $update->getKey());
+    $job->setJob(releasableJob(5));
+    app()->call([$job, 'handle']);
+
+    // The processor never ran: no greeting, no customer, nothing marked done.
+    Http::assertNothingSent();
+
+    expect($update->fresh()->status)->toBe(TelegramUpdateStatus::Received)
+        ->and($update->fresh()->processed_at)->toBeNull()
+        ->and(User::query()->count())->toBe(0);
+
+    // Released rather than dropped: once the holder is finished, the retry
+    // does the work, exactly once.
+    $held->release();
+    runJob($update);
+
+    expect($update->fresh()->status)->toBe(TelegramUpdateStatus::Processed)
+        ->and(User::query()->count())->toBe(1)
+        ->and(Http::recorded()->count())->toBe(1);
+});
+
+it('holds the update back when the locks store cannot coordinate at all', function (): void {
+    telegramOk();
+    $update = recordUpdate(startPayload(701500));
+
+    // A cache that works and simply has no locks to give.
+    Cache::extend('lockless', fn (): Repository => new Repository(new LocklessStore));
+    config()->set('cache.stores.locks', ['driver' => 'lockless']);
+    Cache::forgetDriver('locks');
+
+    $job = new ProcessTelegramUpdateJob((int) $update->getKey());
+    $job->setJob(releasableJob(5));
+    app()->call([$job, 'handle']);
+
+    // Uncoordinated processing is not the fallback. Nothing was sent, nobody
+    // was created, and the update is still there for a properly configured
+    // worker to pick up.
+    Http::assertNothingSent();
+
+    expect($update->fresh()->status)->toBe(TelegramUpdateStatus::Received)
+        ->and($update->fresh()->processed_at)->toBeNull()
+        ->and(User::query()->count())->toBe(0);
+});
+
+it('gives the lock back when it is finished, success or failure', function (): void {
+    // One sequence for the whole test: a greeting that works, then one that
+    // Telegram rejects. Declared once, because a second fake would be appended
+    // to this one rather than replacing it.
+    Http::fake(['api.telegram.test/*' => Http::sequence()
+        ->push(['ok' => true, 'result' => ['message_id' => 1]])
+        ->push(['ok' => false, 'error_code' => 400, 'description' => 'nope'])]);
+
+    $update = recordUpdate(startPayload(701600));
+
+    runJob($update);
+
+    $afterSuccess = telegramUpdateLock($update);
+
+    expect($afterSuccess->get())->toBeTrue();
+
+    $afterSuccess->release();
+
+    // And when the work threw rather than succeeded: the release is in a
+    // finally, so a failing update does not stay locked for its whole TTL.
+    $failing = recordUpdate(startPayload(701601, 5500999888));
+
+    expect(fn () => runJob($failing))->toThrow(App\Telegram\Exceptions\TelegramRejected::class);
+
+    $afterFailure = telegramUpdateLock($failing);
+
+    expect($afterFailure->get())->toBeTrue();
+
+    $afterFailure->release();
 });

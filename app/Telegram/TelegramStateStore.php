@@ -74,7 +74,7 @@ final readonly class TelegramStateStore
      */
     public function get(int $telegramUserId): ?array
     {
-        /** @var mixed $raw */
+        // The Redis mixin types this; the check below narrows it.
         $raw = $this->connection()->get($this->key($telegramUserId));
 
         if (! is_string($raw) || $raw === '') {
@@ -117,7 +117,6 @@ final readonly class TelegramStateStore
     /** How many seconds the current state has left, or null if there is none. */
     public function secondsRemaining(int $telegramUserId): ?int
     {
-        /** @var mixed $ttl */
         $ttl = $this->connection()->ttl($this->key($telegramUserId));
 
         return is_int($ttl) && $ttl >= 0 ? $ttl : null;

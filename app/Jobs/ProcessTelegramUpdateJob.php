@@ -14,7 +14,10 @@ use App\Telegram\Exceptions\TelegramRateLimited;
 use App\Telegram\TelegramAccountService;
 use App\Telegram\TelegramUpdateProcessor;
 use App\Telegram\TelegramUpdateRecorder;
+use Illuminate\Cache\Repository as CacheRepository;
 use Illuminate\Contracts\Cache\Factory as CacheFactory;
+use Illuminate\Contracts\Cache\Lock;
+use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Queue\Queueable;
 use Illuminate\Support\Facades\Log;
@@ -85,9 +88,25 @@ final class ProcessTelegramUpdateJob implements ShouldQueue
         // absence is what makes the system correct, which is why a crashed
         // holder simply loses the lock rather than leaving the update in a
         // state nothing will pick up again.
-        $lock = $cache->store('locks')->lock($this->lockKey(), 30);
+        $lock = $this->lockFor($cache);
+
+        if (! $lock instanceof Lock) {
+            // The configured store cannot coordinate at all. Going ahead
+            // anyway would be handling the update with the one thing that
+            // stops a customer being messaged twice simply missing, so the
+            // update goes back to the queue untouched instead. It is still
+            // pending, so a retry starts exactly where this attempt did.
+            Log::warning('telegram.lock_unavailable', [
+                'telegram_update_id' => $this->telegramUpdateId,
+            ]);
+
+            $this->release(5);
+
+            return;
+        }
 
         if (! $lock->get()) {
+            // Somebody else is already handling this one.
             $this->release(5);
 
             return;
@@ -100,8 +119,33 @@ final class ProcessTelegramUpdateJob implements ShouldQueue
                 $lock->release();
             } catch (Throwable) {
                 // Already expired, or Redis went away. The TTL is the backstop.
+                // Never allowed to mask what the processing itself did.
             }
         }
+    }
+
+    /**
+     * The lock for this update, from the store that can actually make one.
+     *
+     * Taken from the underlying store rather than the cache repository, which
+     * has no `lock()` method of its own — calls reach the store through magic
+     * forwarding, so asking the repository directly is a runtime hope rather
+     * than a checked call.
+     *
+     * Null when the configured store cannot provide locks, which the caller
+     * treats as a reason to retry rather than to proceed: coordination that
+     * cannot be obtained is not the same as coordination that is not needed.
+     * The permanent guarantee remains the unique update_id and the row's
+     * status; this lock only keeps two workers off one update at once.
+     */
+    private function lockFor(CacheFactory $cache): ?Lock
+    {
+        $repository = $cache->store('locks');
+        $store = $repository instanceof CacheRepository ? $repository->getStore() : null;
+
+        return $store instanceof LockProvider
+            ? $store->lock($this->lockKey(), 30)
+            : null;
     }
 
     private function run(
