@@ -4,11 +4,11 @@ A platform for selling and managing VPS / cloud servers. Customers buy and
 manage servers through a Telegram bot; staff operate the system through a web
 admin panel.
 
-**Status: Phase 1 (Foundation) only.** This repository currently contains the
-application skeleton and its infrastructure. None of the product features exist
-yet — see [What is not built yet](#what-is-not-built-yet).
+**Status: foundation and identity only.** The infrastructure and the staff
+identity model exist; none of the product features do — see
+[What is not built yet](#what-is-not-built-yet).
 
-## What Phase 1 provides
+## What exists so far
 
 - Laravel 12 on PHP 8.3, timestamps in UTC
 - PostgreSQL 16 as the only database, with real PostgreSQL integration tests
@@ -17,6 +17,9 @@ yet — see [What is not built yet](#what-is-not-built-yet).
 - Structured JSON logging to stderr, with credentials redacted
 - A Docker Compose topology: app, nginx, postgres, redis, three queue workers, scheduler
 - GitHub Actions CI covering tests, static analysis, security scanning, shell and Docker
+- Customer and administrator identity, Telegram account records, database-backed
+  settings and an append-only audit trail
+- An admin panel behind role-based access and mandatory two-factor authentication
 
 ## Requirements
 
@@ -37,6 +40,9 @@ Point `DB_*` and `REDIS_*` at your local services, create the databases, then:
 
 ```bash
 php artisan migrate
+# Publishes the admin panel's CSS and JS. Build output, so it is not committed;
+# the Docker image generates it during the build.
+php artisan filament:assets
 php artisan serve
 ```
 
@@ -91,6 +97,48 @@ Returns `503` with `"status":"degraded"` when a dependency is unreachable. The
 response carries service states only — no versions, hostnames or error detail.
 Containers without HTTP use the same check via `php artisan app:health`.
 
+## Administrators
+
+Staff use the admin panel at `/admin`. There is no customer web interface:
+customers use the Telegram bot.
+
+Create the first account:
+
+```bash
+php artisan app:create-admin
+```
+
+It prompts for a name, an email address and a password (hidden, entered twice),
+creates an active account with the `owner` role, and refuses to touch an account
+that already exists — so re-running an installer can never reset a password or
+grant a role by accident.
+
+### Roles
+
+Three roles, provisioned idempotently by the `RolePermissionSeeder`:
+
+| Role | Holds |
+|---|---|
+| `owner` | Every permission |
+| `finance` | Payments, refunds, wallet adjustments, invoices, financial reporting |
+| `support` | Customers, orders, servers, audit viewing — and no financial permission |
+
+Being privileged means holding one of these roles. There is no `is_admin` flag.
+
+```bash
+php artisan db:seed --class=Database\\Seeders\\RolePermissionSeeder
+```
+
+### Two-factor authentication
+
+Privileged accounts require TOTP. An administrator who has not enrolled can
+reach only the enrolment page; everything else in the panel redirects there
+until they confirm a code. Secrets and recovery codes are encrypted at rest and
+are never written to logs or the audit trail.
+
+The requirement can be relaxed outside production for automated tests. In
+production it always applies, regardless of configuration.
+
 ## Operational notes
 
 - **`APP_KEY` is generated once and preserved.** It encrypts stored credentials;
@@ -103,16 +151,20 @@ Containers without HTTP use the same check via `php artisan app:health`.
   with workers stopped, so two starting containers cannot race the migrator.
 - **No default database password.** Compose refuses to start unless
   `DB_PASSWORD` is set.
+- **The audit trail cannot be rewritten.** The model refuses updates and
+  deletes, and PostgreSQL triggers reject them too, so an entry survives even
+  code that never loads the model.
 
 ## What is not built yet
 
 Nothing below exists in the repository yet. Each arrives in its own phase:
 
-customers and Telegram identity · admin roles and the Filament panel · the
-provider abstraction, FakeProvider and Hetzner · wallet, payments and invoices ·
-products, pricing and exchange rates · orders and refunds · provisioning and
-reconciliation · the Telegram bot itself · subscriptions, renewals and expiry ·
-install, update, backup and restore scripts.
+the provider abstraction, FakeProvider and Hetzner · wallet, payments and
+invoices · products, pricing and exchange rates · orders and refunds ·
+provisioning and reconciliation · the Telegram bot itself, including webhook
+handling and the buy flow · subscriptions, renewals and expiry · notifications ·
+the operational admin screens (the panel currently has sign-in and two-factor
+enrolment only) · install, update, backup and restore scripts.
 
 Release 1.0 bills monthly only. Hourly and capped billing are Release 1.1.
 

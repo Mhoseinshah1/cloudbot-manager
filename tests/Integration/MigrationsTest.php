@@ -18,10 +18,25 @@ it('creates the failed jobs table', function (): void {
         ->and(Schema::hasColumns('failed_jobs', ['uuid', 'connection', 'queue', 'payload', 'exception']))->toBeTrue();
 });
 
-it('ships no domain tables yet', function (): void {
-    // Phase 1 is foundation only. Identity, wallet, orders and provisioning
-    // arrive in their own phases; finding them here means scope crept.
-    foreach (['users', 'wallet_transactions', 'orders', 'servers', 'subscriptions'] as $table) {
-        expect(Schema::hasTable($table))->toBeFalse();
+it('creates the identity and administration tables', function (): void {
+    foreach (['users', 'telegram_accounts', 'settings', 'audit_logs', 'roles', 'permissions'] as $table) {
+        expect(Schema::hasTable($table))->toBeTrue("expected {$table}");
+    }
+});
+
+it('ships no table belonging to a later phase', function (): void {
+    // Guards against scope creep. Providers, money, orders, provisioning and
+    // Telegram update handling each arrive in their own phase; finding one of
+    // these here means work was pulled forward.
+    $laterPhases = [
+        'providers', 'provider_credentials', 'provider_locations', 'provider_plans', 'provider_images',
+        'products', 'product_location_prices', 'exchange_rates',
+        'wallet_transactions', 'payments', 'invoices',
+        'orders', 'provisioning_attempts', 'servers', 'server_actions', 'subscriptions',
+        'telegram_updates', 'outbox_messages', 'notification_logs',
+    ];
+
+    foreach ($laterPhases as $table) {
+        expect(Schema::hasTable($table))->toBeFalse("{$table} belongs to a later phase");
     }
 });

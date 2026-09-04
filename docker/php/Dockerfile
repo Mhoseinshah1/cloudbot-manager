@@ -71,6 +71,10 @@ COPY . .
 # happens on first boot, where the cache directory is writable.
 RUN composer dump-autoload --no-dev --optimize --no-interaction --no-scripts
 
+# Publishes the admin panel's CSS and JS into public/. They are build output,
+# not source, so they are generated here rather than committed.
+RUN php artisan filament:assets
+
 # ---------------------------------------------------------------------------
 # App: PHP-FPM runtime.
 # ---------------------------------------------------------------------------
@@ -101,6 +105,9 @@ CMD ["php-fpm"]
 FROM nginx:1.27-alpine AS nginx
 
 COPY docker/nginx/default.conf /etc/nginx/conf.d/default.conf
-COPY public /var/www/html/public
+
+# From the build stage, not the context: the panel assets are generated during
+# the build and do not exist in the source tree.
+COPY --from=build /var/www/html/public /var/www/html/public
 
 EXPOSE 80
