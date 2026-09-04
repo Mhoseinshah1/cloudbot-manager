@@ -16,6 +16,8 @@ it('documents every variable this phase implements', function (string $variable)
     'REDIS_CACHE_DB', 'REDIS_QUEUE_DB', 'REDIS_STATE_DB', 'REDIS_LOCK_DB',
     'CACHE_STORE', 'SESSION_DRIVER', 'QUEUE_CONNECTION',
     'PROVIDER_OPERATION_TIMEOUT_SECONDS', 'PROVISIONING_LOCK_TTL_SECONDS',
+    'TELEGRAM_BOT_TOKEN', 'TELEGRAM_WEBHOOK_SECRET', 'TELEGRAM_API_BASE_URL',
+    'TELEGRAM_WEBHOOK_URL', 'TELEGRAM_STATE_TTL_SECONDS',
 ]);
 
 it('ships no variable for a phase that has not been built', function (string $variable): void {
@@ -24,8 +26,6 @@ it('ships no variable for a phase that has not been built', function (string $va
     // something that silently does nothing.
     expect(envExample())->not->toContain($variable);
 })->with([
-    'TELEGRAM_BOT_TOKEN',
-    'TELEGRAM_WEBHOOK_SECRET',
     'HETZNER',
     'FX_MAX_AGE_MINUTES',
     'ZARINPAL',

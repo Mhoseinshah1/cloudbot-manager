@@ -27,6 +27,7 @@ it('creates the identity and administration tables', function (): void {
         'products', 'product_location_prices', 'exchange_rates',
         'orders', 'outbox_messages',
         'provisioning_attempts', 'servers', 'subscriptions',
+        'telegram_updates',
     ] as $table) {
         expect(Schema::hasTable($table))->toBeTrue("expected {$table}");
     }
@@ -34,11 +35,11 @@ it('creates the identity and administration tables', function (): void {
 
 it('ships no table belonging to a later phase', function (): void {
     // Guards against scope creep. The boundary moves forward as each phase
-    // lands: provisioning, servers and subscriptions arrived with Phase 7, so
-    // what is now premature is Telegram handling, customer server actions and
-    // Release 1.1 billing.
+    // lands: Telegram update handling arrived with Phase 8, so what is now
+    // premature is customer server actions, notification history and Release
+    // 1.1 billing.
     $laterPhases = [
-        'server_actions', 'telegram_updates', 'notification_logs', 'billing_charges',
+        'server_actions', 'notification_logs', 'billing_charges',
     ];
 
     foreach ($laterPhases as $table) {

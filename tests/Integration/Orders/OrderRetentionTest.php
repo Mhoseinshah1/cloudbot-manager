@@ -193,12 +193,12 @@ it('refuses a non-positive order total', function (): void {
     }
 });
 
-it('ships no table belonging to phase 8 or later', function (): void {
-    // The scope-creep guard, moved forward with the build. Provisioning,
-    // servers and subscriptions arrived with Phase 7; Telegram handling,
-    // customer server actions and Release 1.1 billing have not.
+it('ships no table belonging to phase 9 or later', function (): void {
+    // The scope-creep guard, moved forward with the build. Telegram update
+    // handling arrived with Phase 8; customer server actions, notification
+    // history and Release 1.1 billing have not.
     foreach ([
-        'server_actions', 'telegram_updates', 'notification_logs', 'billing_charges',
+        'server_actions', 'notification_logs', 'billing_charges',
     ] as $table) {
         expect(Schema::hasTable($table))->toBeFalse("{$table} belongs to a later phase");
     }
