@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Models;
 
 use App\Enums\PaymentStatus;
+use App\Exceptions\FinancialRecordDeletionForbidden;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -78,6 +79,21 @@ class Payment extends Model
     public function verifiedByAdmin(): BelongsTo
     {
         return $this->belongsTo(User::class, 'verified_by_admin_id');
+    }
+
+    /**
+     * Refuse deletion in the application layer.
+     *
+     * Updates stay allowed: a payment's status legitimately changes as it is
+     * verified or rejected. Only erasure is refused. The database refuses it
+     * too; this gives a clear error at the call site, that one still holds for
+     * code which never loads this model.
+     */
+    protected static function booted(): void
+    {
+        static::deleting(static function (self $payment): never {
+            throw FinancialRecordDeletionForbidden::forPayment();
+        });
     }
 
     /**

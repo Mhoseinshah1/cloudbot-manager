@@ -10,6 +10,7 @@ use App\Enums\Permission;
 use App\Enums\WalletTransactionType;
 use App\Models\User;
 use App\Models\WalletTransaction;
+use App\Support\Secrets\SecretScrubber;
 use App\Wallet\Exceptions\IdempotencyConflict;
 use App\Wallet\Exceptions\InsufficientBalance;
 use App\Wallet\Exceptions\InvalidWalletAmount;
@@ -155,7 +156,7 @@ final readonly class WalletService
     /**
      * The one place the balance changes.
      *
-     * @param  array<string, mixed>  $metadata
+     * @param  array<array-key, mixed>  $metadata
      */
     private function apply(
         User $user,
@@ -168,6 +169,14 @@ final readonly class WalletService
         string $auditEvent,
         ?User $actor = null,
     ): WalletTransaction {
+        // Before anything is written, and once, so the ledger row, the audit
+        // entry and any later reader all see the same text. The ledger is
+        // immutable and kept for years: a credential written here could never
+        // be taken back out, and a scrubbed row is still perfectly legible for
+        // the forensic purpose the ledger actually serves.
+        $description = SecretScrubber::scrubText($description);
+        $metadata = SecretScrubber::scrub($metadata);
+
         return DB::transaction(function () use (
             $user, $type, $signedAmountToman, $idempotencyKey,
             $description, $reference, $metadata, $auditEvent, $actor

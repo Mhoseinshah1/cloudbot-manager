@@ -7,6 +7,7 @@ namespace App\Billing;
 use App\Audit\AuditEvent;
 use App\Audit\AuditRecorder;
 use App\Billing\Contracts\PaymentGatewayInterface;
+use App\Billing\Data\PaymentInstruction;
 use App\Billing\Exceptions\GatewayMismatch;
 use App\Billing\Exceptions\PaymentIdempotencyConflict;
 use App\Billing\Exceptions\PaymentNotVerifiable;
@@ -90,6 +91,25 @@ final readonly class PaymentService
 
             throw $exception;
         }
+    }
+
+    /**
+     * Ask a payment's own gateway what the customer must do next.
+     *
+     * The same ownership rule that governs settlement, applied one step
+     * earlier. Telling a customer to make a bank transfer for a payment that
+     * an automated gateway is waiting to confirm sends real money down a route
+     * nothing will ever reconcile it against, and leaves them holding a receipt
+     * for a payment the system will never accept.
+     *
+     * Production code asks for instructions here rather than calling a gateway
+     * directly, so the check cannot be forgotten by the caller.
+     */
+    public function instructions(Payment $payment, PaymentGatewayInterface $gateway): PaymentInstruction
+    {
+        $this->assertGatewayOwns($payment, $gateway);
+
+        return $gateway->instructionsFor($payment);
     }
 
     /**

@@ -33,7 +33,12 @@ final class SecretScrubber
     ];
 
     /**
-     * Guards against unbounded recursion on deeply nested or cyclic input.
+     * How far into a structure this will look.
+     *
+     * Anything nested deeper is redacted rather than passed through: what has
+     * not been inspected cannot be shown to be free of credentials, and a
+     * payload that deep is a wholesale response rather than the handful of
+     * named facts these callers are meant to record.
      */
     private const MAX_DEPTH = 8;
 
@@ -48,10 +53,6 @@ final class SecretScrubber
      */
     public static function scrub(array $values, int $depth = 0): array
     {
-        if ($depth >= self::MAX_DEPTH) {
-            return $values;
-        }
-
         $scrubbed = [];
 
         foreach ($values as $key => $value) {
@@ -62,7 +63,9 @@ final class SecretScrubber
             }
 
             $scrubbed[$key] = match (true) {
-                is_array($value) => self::scrub($value, $depth + 1),
+                is_array($value) => $depth + 1 >= self::MAX_DEPTH
+                    ? self::REDACTED
+                    : self::scrub($value, $depth + 1),
                 is_string($value) => self::scrubText($value),
                 default => $value,
             };

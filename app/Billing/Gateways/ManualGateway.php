@@ -7,6 +7,7 @@ namespace App\Billing\Gateways;
 use App\Billing\Contracts\PaymentGatewayInterface;
 use App\Billing\Data\PaymentInstruction;
 use App\Billing\Data\PaymentVerificationResult;
+use App\Billing\Exceptions\GatewayMismatch;
 use App\Models\Payment;
 use App\Support\Secrets\SecretScrubber;
 
@@ -47,8 +48,21 @@ final class ManualGateway implements PaymentGatewayInterface
         return false;
     }
 
+    /**
+     * Defence in depth, not the guarantee.
+     *
+     * PaymentService is where this rule is enforced for the application as a
+     * whole; refusing here as well means this particular gateway — the one that
+     * would tell a customer to transfer real money by hand — cannot be misused
+     * even by code that bypassed that boundary. A future gateway is not
+     * expected to remember this, which is exactly why the central check exists.
+     */
     public function instructionsFor(Payment $payment): PaymentInstruction
     {
+        if ($payment->gateway !== self::CODE) {
+            throw GatewayMismatch::between($payment->gateway, self::CODE);
+        }
+
         return PaymentInstruction::manual(
             'Transfer the amount shown and send the bank reference. '
             .'An operator will confirm it before the wallet is credited.'

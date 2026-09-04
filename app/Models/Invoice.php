@@ -6,6 +6,7 @@ namespace App\Models;
 
 use App\Enums\InvoiceStatus;
 use App\Enums\InvoiceType;
+use App\Exceptions\FinancialRecordDeletionForbidden;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
@@ -44,6 +45,19 @@ class Invoice extends Model
             'line_items' => 'array',
             'pricing_snapshot' => 'array',
         ];
+    }
+
+    /**
+     * Refuse deletion in the application layer.
+     *
+     * Updates stay allowed: an invoice's status has a lifecycle ahead of it.
+     * Only erasure is refused, and the database refuses it as well.
+     */
+    protected static function booted(): void
+    {
+        static::deleting(static function (self $invoice): never {
+            throw FinancialRecordDeletionForbidden::forInvoice();
+        });
     }
 
     /**

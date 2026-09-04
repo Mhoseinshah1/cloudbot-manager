@@ -13,10 +13,10 @@ use RuntimeException;
 /**
  * A gateway that exists only to be watched.
  *
- * It records every call to verify() and, unless told otherwise, throws when one
- * arrives. That is what lets a test assert something stronger than "settlement
- * refused a mismatched payment": it proves the refusal happened *before* the
- * gateway was consulted at all. A gateway that merely returned a rejection
+ * It records every call to verify() and instructionsFor() and, unless told
+ * otherwise, throws when one arrives. That is what lets a test assert something
+ * stronger than "settlement refused a mismatched payment": it proves the
+ * refusal happened *before* the gateway was consulted at all. A gateway that merely returned a rejection
  * could not tell those two outcomes apart, and the difference matters — a real
  * automated gateway verifies by calling a remote API, so reaching its verify()
  * with someone else's payment is already a request that should never have left
@@ -29,12 +29,15 @@ final class SpyingGateway implements PaymentGatewayInterface
     /** @var list<array{payment_id: int|string|null, evidence: array<string, scalar|null>}> */
     public array $verifyCalls = [];
 
+    /** @var list<int|string|null> */
+    public array $instructionCalls = [];
+
     public function __construct(
         private readonly string $code = self::CODE,
         private readonly bool $throwIfEntered = true,
     ) {}
 
-    /** A gateway whose verify() answers instead of exploding, so the happy path can be tested too. */
+    /** A gateway whose methods answer instead of exploding, so the happy path can be tested too. */
     public static function permissive(string $code = self::CODE): self
     {
         return new self($code, throwIfEntered: false);
@@ -57,12 +60,23 @@ final class SpyingGateway implements PaymentGatewayInterface
 
     public function instructionsFor(Payment $payment): PaymentInstruction
     {
-        return PaymentInstruction::redirect('https://example.invalid/pay');
+        $this->instructionCalls[] = $payment->getKey();
+
+        if ($this->throwIfEntered) {
+            throw new RuntimeException('SpyingGateway::instructionsFor() was entered.');
+        }
+
+        return PaymentInstruction::redirect('https://example.invalid/pay', 'Test gateway redirect.');
     }
 
     public function verifyCallCount(): int
     {
         return count($this->verifyCalls);
+    }
+
+    public function instructionCallCount(): int
+    {
+        return count($this->instructionCalls);
     }
 
     /**
