@@ -35,4 +35,9 @@ final class FinancialRecordDeletionForbidden extends RuntimeException
     {
         return new self('invoice', 'Invoices are retained financial history and cannot be deleted.');
     }
+
+    public static function forOrder(): self
+    {
+        return new self('order', 'Orders are retained financial history and cannot be deleted.');
+    }
 }

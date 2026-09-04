@@ -14,6 +14,9 @@ enum InvoiceType: string
 {
     case WalletTopUp = 'wallet_top_up';
 
+    /** A customer bought a server, paid from their wallet balance. */
+    case ServerPurchase = 'server_purchase';
+
     /**
      * @return list<string>
      */

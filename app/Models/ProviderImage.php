@@ -12,6 +12,10 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  *
  * @property int $provider_id
  * @property string $provider_image_id
+ * @property string $name
+ * @property string $os_family
+ * @property string $version
+ * @property string $architecture
  * @property bool $deprecated
  * @property bool $enabled
  * @property array<string, mixed>|null $metadata

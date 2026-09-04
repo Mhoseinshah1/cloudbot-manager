@@ -8,6 +8,7 @@ use App\Billing\Exceptions\PaymentNotVerifiable;
 use App\Enums\InvoiceStatus;
 use App\Enums\InvoiceType;
 use App\Models\Invoice;
+use App\Models\Order;
 use App\Models\Payment;
 use Illuminate\Database\QueryException;
 
@@ -22,6 +23,7 @@ use Illuminate\Database\QueryException;
  * Only a settled payment may be invoiced. Settlement calls this after marking
  * the payment paid, but nothing stops another caller reaching it directly, and
  * an invoice for an unsettled payment would record funding that never happened.
+ * The same rule applies to an order: it must have been paid for.
  */
 final class InvoiceService
 {
@@ -79,6 +81,82 @@ final class InvoiceService
 
             throw $exception;
         }
+    }
+
+    /**
+     * Issue the invoice for a paid order, or return the one that exists.
+     *
+     * A separate document from a wallet top-up invoice and a separate number
+     * series, because they record different things: one says money came in,
+     * this one says money was spent on a specific server. Numbering it from the
+     * order's own id makes issuing a second one for the same purchase
+     * impossible without a counter that would need its own locking.
+     *
+     * The prices come from the order's frozen snapshot, never from the catalog.
+     * An invoice recomputed at issue time would quietly disagree with what the
+     * customer was charged if anything had moved in between.
+     */
+    public function issueForOrder(Order $order): Invoice
+    {
+        if (! $order->status->isFunded()) {
+            // An invoice asserts the customer paid. Issuing one for an unpaid
+            // order would document money that never moved, and this service is
+            // reachable from outside the payment path.
+            throw PaymentNotVerifiable::notOpen($order->status->value);
+        }
+
+        $number = $this->numberForOrder($order);
+
+        $existing = Invoice::query()->where('number', $number)->first();
+
+        if ($existing instanceof Invoice) {
+            return $existing;
+        }
+
+        try {
+            return Invoice::query()->create([
+                'user_id' => $order->user_id,
+                'order_id' => $order->getKey(),
+                'number' => $number,
+                'type' => InvoiceType::ServerPurchase,
+                'amount_toman' => $order->total_toman,
+                'status' => InvoiceStatus::Issued,
+                'issued_at' => now(),
+                'line_items' => [[
+                    'description' => 'Server purchase, order '.$order->order_number,
+                    'quantity' => 1,
+                    'unit_price_toman' => $order->total_toman,
+                    'total_toman' => $order->total_toman,
+                ]],
+                // The order's own record of what was quoted, carried across so
+                // the invoice and the order can never tell different stories.
+                'pricing_snapshot' => [
+                    'order_number' => $order->order_number,
+                    'pricing' => $order->pricing_snapshot,
+                    'cost' => $order->cost_snapshot,
+                ],
+            ]);
+        } catch (QueryException $exception) {
+            // A concurrent payment issued it first.
+            $winner = Invoice::query()->where('number', $number)->first();
+
+            if ($winner instanceof Invoice) {
+                return $winner;
+            }
+
+            throw $exception;
+        }
+    }
+
+    /**
+     * The invoice number for an order.
+     *
+     * A separate prefix from payment invoices, so the two series cannot collide
+     * and a number says at a glance what kind of document it is.
+     */
+    public function numberForOrder(Order $order): string
+    {
+        return sprintf('INV-O%06d', (int) $order->getKey());
     }
 
     /**

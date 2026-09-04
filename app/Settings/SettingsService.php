@@ -83,6 +83,24 @@ final readonly class SettingsService
     }
 
     /**
+     * A string setting, or null if it is absent or empty.
+     *
+     * An empty string is treated as absent rather than as a value: a terms
+     * version of "" is nothing anybody can accept, and returning it would let
+     * a customer agree to it.
+     */
+    public function string(SettingKey $key): ?string
+    {
+        $value = $this->typed($key);
+
+        if (! is_string($value) || trim($value) === '') {
+            return null;
+        }
+
+        return $value;
+    }
+
+    /**
      * Store a setting. Privileged: these are the controls on the business.
      *
      * The value must already be the type the key declares. Nothing here

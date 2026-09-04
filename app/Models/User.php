@@ -116,6 +116,19 @@ class User extends Authenticatable implements FilamentUser
         return $this->hasMany(TelegramAccount::class);
     }
 
+    /**
+     * This customer's orders.
+     *
+     * The relation customer-facing code goes through, so that "their orders"
+     * is expressed in the query rather than checked after loading everyone's.
+     *
+     * @return HasMany<Order, $this>
+     */
+    public function orders(): HasMany
+    {
+        return $this->hasMany(Order::class);
+    }
+
     public function isActive(): bool
     {
         return $this->status->canAuthenticate();

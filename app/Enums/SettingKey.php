@@ -32,11 +32,24 @@ enum SettingKey: string
      */
     case FxMaxAgeMinutes = 'fx.max_age_minutes';
 
+    /**
+     * The acceptable-use terms version a customer must accept to buy.
+     *
+     * The version string only. The terms themselves are a document, published
+     * elsewhere; recording which one a customer agreed to is what an order
+     * needs, and inventing the text here would be inventing the policy.
+     *
+     * Absent or empty means no order can be placed: nobody can accept terms
+     * that have not been declared.
+     */
+    case AupCurrentVersion = 'aup.current_version';
+
     public function type(): SettingType
     {
         return match ($this) {
             self::SalesEnabled => SettingType::Boolean,
             self::FxMaxAgeMinutes => SettingType::Integer,
+            self::AupCurrentVersion => SettingType::String,
         };
     }
 

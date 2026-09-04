@@ -44,4 +44,18 @@ final class AuditEvent
     public const InvoiceIssued = 'invoice.issued';
 
     public const ExchangeRateRecorded = 'fx.rate_recorded';
+
+    public const OrderCreated = 'order.created';
+
+    public const OrderAwaitingPayment = 'order.awaiting_payment';
+
+    public const OrderPaid = 'order.paid';
+
+    public const OrderFailed = 'order.failed';
+
+    public const OrderRefunded = 'order.refunded';
+
+    public const OrderExpired = 'order.expired';
+
+    public const OrderCancelled = 'order.cancelled';
 }

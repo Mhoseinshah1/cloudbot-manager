@@ -69,6 +69,19 @@ class Invoice extends Model
     }
 
     /**
+     * The order this belongs to, where there is one.
+     *
+     * Null for a wallet top-up, which is the normal case in Release 1.0: money
+     * comes into the wallet without an order, and is spent on one later.
+     *
+     * @return BelongsTo<Order, $this>
+     */
+    public function order(): BelongsTo
+    {
+        return $this->belongsTo(Order::class);
+    }
+
+    /**
      * What the line items add up to.
      *
      * Integer arithmetic throughout; this must equal amount_toman.

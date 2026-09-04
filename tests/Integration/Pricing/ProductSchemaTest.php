@@ -17,13 +17,13 @@ it('creates the phase 5 tables', function (): void {
     }
 });
 
-it('ships no table belonging to phase 6 or later', function (): void {
+it('ships no table belonging to phase 7 or later', function (): void {
     // Phase 5 ends at a validated pricing decision. Orders, provisioning and
     // subscriptions each arrive in their own phase; finding one here would
     // mean work was pulled forward.
     foreach ([
-        'orders', 'provisioning_attempts', 'servers', 'server_actions', 'subscriptions',
-        'telegram_updates', 'outbox_messages', 'notification_logs', 'billing_charges',
+        'provisioning_attempts', 'servers', 'server_actions', 'subscriptions',
+        'telegram_updates', 'notification_logs', 'billing_charges',
     ] as $table) {
         expect(Schema::hasTable($table))->toBeFalse("{$table} belongs to a later phase");
     }
