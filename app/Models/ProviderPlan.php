@@ -14,10 +14,12 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * the decimal cast and must stay that way: converting them to a float on the
  * way to a customer price would introduce rounding error into money.
  *
+ * @property int $provider_id
  * @property string $provider_plan_id
  * @property string $provider_price_monthly
  * @property string|null $provider_price_hourly
  * @property string $provider_currency
+ * @property bool $enabled
  * @property array<string, mixed>|null $metadata
  */
 class ProviderPlan extends Model

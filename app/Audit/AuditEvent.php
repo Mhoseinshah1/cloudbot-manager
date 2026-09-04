@@ -42,4 +42,6 @@ final class AuditEvent
     public const PaymentVerified = 'payment.verified';
 
     public const InvoiceIssued = 'invoice.issued';
+
+    public const ExchangeRateRecorded = 'fx.rate_recorded';
 }

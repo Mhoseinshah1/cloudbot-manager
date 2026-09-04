@@ -13,6 +13,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * Provider-supplied fields are refreshed by a sync and should be treated as
  * read-only locally; `enabled` is ours and must survive one.
  *
+ * @property int $provider_id
  * @property string $provider_location_id
  * @property bool $enabled
  * @property bool $available

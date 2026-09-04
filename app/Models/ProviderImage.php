@@ -10,6 +10,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
 /**
  * A provider operating-system image, synchronised from the provider.
  *
+ * @property int $provider_id
  * @property string $provider_image_id
  * @property bool $deprecated
  * @property bool $enabled
