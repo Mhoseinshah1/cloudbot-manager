@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use App\Audit\AuditEvent;
 use App\Authorization\RoleProvisioner;
+use App\Enums\ImageSelectionMode;
 use App\Enums\OrderRefusalReason;
 use App\Enums\OrderStatus;
 use App\Enums\SaleRefusalReason;
@@ -56,6 +57,20 @@ function refusalToPlace(PurchaseIntent $intent): OrderRefusalReason
     }
 
     test()->fail('The order was placed when it should have been refused.');
+}
+
+/**
+ * @param  array<string, mixed>  $snapshot
+ * @return list<string>
+ */
+function sortedKeys(array $snapshot): array
+{
+    // PostgreSQL jsonb does not preserve insertion order, so the set of keys
+    // is the fact worth asserting, not their order.
+    $keys = array_keys($snapshot);
+    sort($keys);
+
+    return $keys;
 }
 
 it('places one order for an active customer who accepted the current terms', function (): void {
@@ -194,8 +209,10 @@ it('snapshots the selected image identity', function (): void {
         ->and($image['os_family'])->toBe('ubuntu')
         ->and($image['version'])->toBe('24.04')
         ->and($image['architecture'])->toBe('x86')
-        ->and(array_keys($image))->toBe([
-            'provider_image_id', 'provider_native_id', 'name', 'os_family', 'version', 'architecture',
+        ->and($image['selection_mode'])->toBe(ImageSelectionMode::Explicit->value)
+        ->and(sortedKeys($image))->toBe([
+            'architecture', 'name', 'os_family', 'provider_image_id', 'provider_native_id',
+            'selection_mode', 'version',
         ]);
 });
 
@@ -314,9 +331,36 @@ it('refuses a replayed key for a different product or location', function (): vo
     ])))->toThrow(OrderIdempotencyConflict::class);
 });
 
-it('refuses a replayed key with a different selected image', function (): void {
+it('records how the image was chosen, not just which one', function (): void {
+    // Two different purchase intentions, even when they resolve to the same
+    // image today, because the location's default can change between them.
+    $explicit = $this->orders->place(intentFor(['providerImageId' => $this->floor->catalog->image->id]));
+    $default = $this->orders->place(intentFor());
+
+    expect($explicit->pricing_snapshot['image']['selection_mode'])->toBe(ImageSelectionMode::Explicit->value)
+        ->and($default->pricing_snapshot['image']['selection_mode'])->toBe(ImageSelectionMode::Default->value)
+        // Both still resolved to the same image, which is exactly why the mode
+        // has to be recorded separately.
+        ->and($explicit->pricing_snapshot['image']['provider_image_id'])
+        ->toBe($default->pricing_snapshot['image']['provider_image_id']);
+});
+
+it('returns the same order when an explicit choice is replayed', function (): void {
     $key = (string) Str::uuid();
-    $this->orders->place(intentFor(['idempotencyKey' => $key]));
+    $imageId = $this->floor->catalog->image->id;
+
+    $first = $this->orders->place(intentFor(['idempotencyKey' => $key, 'providerImageId' => $imageId]));
+    $replay = $this->orders->place(intentFor(['idempotencyKey' => $key, 'providerImageId' => $imageId]));
+
+    expect($replay->getKey())->toBe($first->getKey())
+        ->and(Order::query()->count())->toBe(1);
+});
+
+it('refuses a replay that names a different image', function (): void {
+    $key = (string) Str::uuid();
+    $this->orders->place(intentFor([
+        'idempotencyKey' => $key, 'providerImageId' => $this->floor->catalog->image->id,
+    ]));
 
     $another = ProviderImage::query()->create([
         'provider_id' => $this->floor->catalog->provider->id,
@@ -327,6 +371,96 @@ it('refuses a replayed key with a different selected image', function (): void {
     expect(fn () => $this->orders->place(intentFor([
         'idempotencyKey' => $key, 'providerImageId' => $another->id,
     ])))->toThrow(OrderIdempotencyConflict::class);
+});
+
+it('refuses a replay that switches from an explicit image to the default', function (): void {
+    // The asymmetry this closes: the original named an image, the retry asks
+    // for "whatever you recommend". That is a different request even though
+    // the default happens to resolve to the same image right now.
+    $key = (string) Str::uuid();
+    $first = $this->orders->place(intentFor([
+        'idempotencyKey' => $key, 'providerImageId' => $this->floor->catalog->image->id,
+    ]));
+
+    expect(fn () => $this->orders->place(intentFor(['idempotencyKey' => $key, 'providerImageId' => null])))
+        ->toThrow(OrderIdempotencyConflict::class);
+
+    expect(Order::query()->count())->toBe(1)
+        ->and($first->fresh()->pricing_snapshot['image']['selection_mode'])
+        ->toBe(ImageSelectionMode::Explicit->value);
+});
+
+it('refuses a replay that switches from the default to naming that same image', function (): void {
+    // The mirror image, and equally a different request.
+    $key = (string) Str::uuid();
+    $this->orders->place(intentFor(['idempotencyKey' => $key]));
+
+    expect(fn () => $this->orders->place(intentFor([
+        'idempotencyKey' => $key, 'providerImageId' => $this->floor->catalog->image->id,
+    ])))->toThrow(OrderIdempotencyConflict::class);
+});
+
+it('returns the same order when the default choice is replayed', function (): void {
+    $key = (string) Str::uuid();
+
+    $first = $this->orders->place(intentFor(['idempotencyKey' => $key]));
+    $replay = $this->orders->place(intentFor(['idempotencyKey' => $key]));
+
+    expect($replay->getKey())->toBe($first->getKey())
+        ->and(Order::query()->count())->toBe(1);
+});
+
+it('does not re-resolve the default when replaying after it changed', function (): void {
+    // A retry asks whether the original request succeeded. It is not a new
+    // business decision, so today's default is irrelevant to answering it.
+    $key = (string) Str::uuid();
+    $first = $this->orders->place(intentFor(['idempotencyKey' => $key]));
+    $originalImageId = $first->pricing_snapshot['image']['provider_image_id'];
+
+    $newDefault = ProviderImage::query()->create([
+        'provider_id' => $this->floor->catalog->provider->id,
+        'provider_image_id' => 'rocky-9', 'name' => 'Rocky 9',
+        'os_family' => 'rocky', 'version' => '9', 'architecture' => 'x86',
+    ]);
+    $this->floor->catalog->price->forceFill(['default_image_id' => $newDefault->id])->save();
+
+    $replay = $this->orders->place(intentFor(['idempotencyKey' => $key]));
+
+    expect($replay->getKey())->toBe($first->getKey())
+        ->and($replay->pricing_snapshot['image']['provider_image_id'])->toBe($originalImageId)
+        ->and($replay->pricing_snapshot['image']['provider_image_id'])->not->toBe($newDefault->id)
+        ->and(Order::query()->count())->toBe(1);
+});
+
+it('never rewrites the image snapshot on a replay', function (): void {
+    $key = (string) Str::uuid();
+    $first = $this->orders->place(intentFor(['idempotencyKey' => $key]));
+    $snapshot = DB::table('orders')->where('id', $first->id)->value('pricing_snapshot');
+
+    $this->orders->place(intentFor(['idempotencyKey' => $key]));
+
+    expect(DB::table('orders')->where('id', $first->id)->value('pricing_snapshot'))->toBe($snapshot)
+        ->and(AuditLog::query()->where('event', AuditEvent::OrderCreated)->count())->toBe(1);
+});
+
+it('asks the pricing service nothing on a valid replay', function (): void {
+    // The idempotency lookup happens before any repricing, so a replay costs
+    // no catalog work and cannot be refused by today's conditions.
+    Http::preventStrayRequests();
+
+    $key = (string) Str::uuid();
+    $this->orders->place(intentFor(['idempotencyKey' => $key]));
+
+    $queries = 0;
+    DB::listen(function () use (&$queries): void {
+        $queries++;
+    });
+
+    $this->orders->place(intentFor(['idempotencyKey' => $key]));
+
+    // One lookup by key, and nothing else: no quote, no catalog reads.
+    expect($queries)->toBe(1);
+    Http::assertNothingSent();
 });
 
 it('refuses a replayed key with a different accepted terms version', function (): void {

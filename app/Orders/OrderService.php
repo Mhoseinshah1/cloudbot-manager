@@ -7,6 +7,7 @@ namespace App\Orders;
 use App\Audit\AuditEvent;
 use App\Audit\AuditRecorder;
 use App\Billing\InvoiceService;
+use App\Enums\ImageSelectionMode;
 use App\Enums\OrderRefusalReason;
 use App\Enums\OrderStatus;
 use App\Enums\SettingKey;
@@ -82,9 +83,10 @@ final readonly class OrderService
 
         $quote = $this->pricing->quoteNewSale($intent->locationPrice);
         $image = $this->requireSelectableImage($intent, $quote);
+        $selectionMode = $intent->imageSelectionMode();
 
         try {
-            return DB::transaction(function () use ($intent, $quote, $image, $aupVersion): Order {
+            return DB::transaction(function () use ($intent, $quote, $image, $selectionMode, $aupVersion): Order {
                 $order = Order::query()->create([
                     'user_id' => $intent->user->getKey(),
                     'product_id' => $quote->productId,
@@ -94,7 +96,7 @@ final readonly class OrderService
                     'total_toman' => $quote->sellingPriceToman,
                     'idempotency_key' => $intent->idempotencyKey,
                     'cost_snapshot' => self::costSnapshot($quote),
-                    'pricing_snapshot' => self::pricingSnapshot($quote, $image),
+                    'pricing_snapshot' => self::pricingSnapshot($quote, $image, $selectionMode),
                     'aup_version' => $aupVersion,
                     // Server-side. A customer-supplied acceptance time proves
                     // nothing about when they accepted.
@@ -345,10 +347,22 @@ final readonly class OrderService
             throw OrderIdempotencyConflict::on($intent->idempotencyKey, 'accepted terms version');
         }
 
+        // Compared both ways round. The mode first: asking for the location's
+        // default and naming an image are different requests even when they
+        // resolve to the same image today, because the default can change
+        // between the original and the retry.
+        $snapshotMode = $existing->pricing_snapshot['image']['selection_mode'] ?? null;
+
+        if ($snapshotMode !== $intent->imageSelectionMode()->value) {
+            throw OrderIdempotencyConflict::on($intent->idempotencyKey, 'image selection');
+        }
+
+        // Then, for an explicit choice, the image itself. A default-mode retry
+        // is deliberately not re-resolved against today's default: the question
+        // is whether the original request succeeded, not what it would resolve
+        // to now.
         $snapshotImageId = $existing->pricing_snapshot['image']['provider_image_id'] ?? null;
 
-        // Null means "whatever the location defaults to", which is what the
-        // original order resolved. Only an explicit, different choice conflicts.
         if ($intent->providerImageId !== null && $snapshotImageId !== $intent->providerImageId) {
             throw OrderIdempotencyConflict::on($intent->idempotencyKey, 'selected image');
         }
@@ -492,8 +506,11 @@ final readonly class OrderService
      *
      * @return array<string, mixed>
      */
-    private static function pricingSnapshot(PriceQuote $quote, ProviderImage $image): array
-    {
+    private static function pricingSnapshot(
+        PriceQuote $quote,
+        ProviderImage $image,
+        ImageSelectionMode $selectionMode,
+    ): array {
         return [
             'product_id' => $quote->productId,
             'product_location_price_id' => $quote->productLocationPriceId,
@@ -508,6 +525,10 @@ final readonly class OrderService
                 'os_family' => $image->os_family,
                 'version' => $image->version,
                 'architecture' => $image->architecture,
+                // How it was chosen, not just what it was. A retry that
+                // switches between naming an image and taking the default is a
+                // different request, and without this the order could not tell.
+                'selection_mode' => $selectionMode->value,
             ],
         ];
     }

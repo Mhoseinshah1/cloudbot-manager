@@ -53,6 +53,8 @@ final class AuditEvent
 
     public const OrderFailed = 'order.failed';
 
+    public const OrderNeedsAttention = 'order.needs_attention';
+
     public const OrderRefunded = 'order.refunded';
 
     public const OrderExpired = 'order.expired';

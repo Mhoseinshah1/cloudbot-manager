@@ -15,6 +15,7 @@ use App\Models\OutboxMessage;
 use App\Models\WalletTransaction;
 use App\Orders\Data\PurchaseIntent;
 use App\Orders\Exceptions\RefundNotPermitted;
+use App\Orders\Exceptions\UncertainOutcomeNotApplicable;
 use App\Orders\OrderService;
 use App\Orders\RefundService;
 use App\Outbox\OutboxTopic;
@@ -41,6 +42,27 @@ function paidOrder(): Order
     ));
 
     return test()->orders->payFromWallet(test()->orders->awaitPayment($order), test()->floor->customer);
+}
+
+/** A paid order whose provider request is in flight. */
+function provisioningOrder(): Order
+{
+    $order = paidOrder();
+    DB::table('orders')->where('id', $order->id)->update(['status' => OrderStatus::Provisioning->value]);
+
+    return $order->fresh();
+}
+
+/** An order forced into a state without any money having moved. */
+function unpaidOrderAt(OrderStatus $status): Order
+{
+    $order = test()->orders->place(new PurchaseIntent(
+        test()->floor->customer, test()->floor->catalog->price,
+        SalesFloor::AUP_VERSION, true, (string) Str::uuid(),
+    ));
+    DB::table('orders')->where('id', $order->id)->update(['status' => $status->value]);
+
+    return $order->fresh();
 }
 
 function refundRefusal(Order $order, ConfirmedNoServerOutcome $outcome): RefundRefusalReason
@@ -151,32 +173,124 @@ it('offers no way to refund an uncertain outcome', function (): void {
         ->and(OrderFailureCategory::values())->toContain('uncertain_result');
 });
 
-it('records an uncertain outcome without refunding anything', function (): void {
+it('parks an uncertain outcome for attention rather than failing it', function (): void {
+    // A request that timed out after the provider received it looks exactly
+    // like one that was refused, and the difference is a real machine. Marking
+    // it failed would put it one step from refunded, which is how a customer
+    // ends up with both their money and their server.
+    $order = provisioningOrder();
+    $balance = $this->floor->customer->fresh()->wallet_balance_toman;
+
+    $parked = $this->refunds->recordUncertainResult($order, 'the provider timed out');
+
+    expect($parked->status)->toBe(OrderStatus::NeedsAttention)
+        ->and($parked->status)->not->toBe(OrderStatus::Failed)
+        ->and($parked->failure_category)->toBe(OrderFailureCategory::UncertainResult)
+        // Still fully charged. Nothing is owed back until somebody finds out.
+        ->and($this->floor->customer->fresh()->wallet_balance_toman)->toBe($balance)
+        ->and(WalletTransaction::query()->where('idempotency_key', $order->refundIdempotencyKey())->count())
+        ->toBe(0)
+        ->and(OutboxMessage::query()->count())->toBe(0)
+        ->and(AuditLog::query()->where('event', AuditEvent::OrderRefunded)->count())->toBe(0);
+});
+
+it('scrubs the reason recorded with an uncertain outcome', function (): void {
+    $marker = 'SYNTHETIC-'.bin2hex(random_bytes(6));
+
+    $parked = $this->refunds->recordUncertainResult(
+        provisioningOrder(), "create timed out: Bearer {$marker}",
+    );
+
+    $raw = DB::table('orders')->where('id', $parked->id)->value('failure_reason');
+
+    expect($raw)->not->toContain($marker)
+        ->and($raw)->toContain('create timed out')
+        ->and($raw)->toContain(SecretScrubber::REDACTED);
+});
+
+it('refuses an uncertain outcome for an order with no request in flight', function (): void {
+    // A paid order has not reached the provider, so its outcome cannot be
+    // uncertain. Accepting it would park a refundable order where nothing
+    // automatic will ever resolve it.
+    $order = paidOrder();
+
+    expect(fn () => $this->refunds->recordUncertainResult($order))
+        ->toThrow(UncertainOutcomeNotApplicable::class);
+
+    // The same order walked through every other state it could be in.
+    foreach ([
+        OrderStatus::Provisioned, OrderStatus::Failed, OrderStatus::Expired,
+        OrderStatus::Cancelled, OrderStatus::AwaitingPayment, OrderStatus::Pending,
+    ] as $status) {
+        DB::table('orders')->where('id', $order->id)->update(['status' => $status->value]);
+
+        expect(fn () => $this->refunds->recordUncertainResult($order->fresh()))
+            ->toThrow(UncertainOutcomeNotApplicable::class, '', $status->value);
+    }
+});
+
+it('records an uncertain outcome once when replayed', function (): void {
+    $order = provisioningOrder();
+
+    $first = $this->refunds->recordUncertainResult($order, 'timed out');
+    $second = $this->refunds->recordUncertainResult($first, 'timed out');
+
+    expect($second->getKey())->toBe($first->getKey())
+        ->and($second->status)->toBe(OrderStatus::NeedsAttention)
+        ->and(AuditLog::query()->where('event', AuditEvent::OrderNeedsAttention)->count())->toBe(1);
+});
+
+it('offers no public way to leave a charged confirmed failure unrefunded', function (): void {
+    // The bypass this closes: a charged order marked failed for a confirmed
+    // no-server outcome, with the customer's money still gone.
     $order = paidOrder();
     $balance = $this->floor->customer->fresh()->wallet_balance_toman;
 
-    $failed = $this->refunds->markFailedWithoutRefund(
-        $order, OrderFailureCategory::UncertainResult, 'the provider timed out',
+    foreach (ConfirmedNoServerOutcome::cases() as $outcome) {
+        expect(fn () => $this->refunds->markUnchargedFailure($order->fresh(), $outcome))
+            ->toThrow(RefundNotPermitted::class, '', $outcome->value);
+    }
+
+    expect($order->fresh()->status)->toBe(OrderStatus::Paid)
+        ->and($this->floor->customer->fresh()->wallet_balance_toman)->toBe($balance);
+
+    // The public surface offers no method taking an arbitrary failure category.
+    $public = array_map(
+        static fn (ReflectionMethod $m): string => $m->name,
+        (new ReflectionClass(RefundService::class))->getMethods(ReflectionMethod::IS_PUBLIC),
+    );
+
+    expect($public)->not->toContain('markFailedWithoutRefund')
+        ->and(array_values(array_diff($public, ['__construct'])))
+        ->toBe(['refundConfirmedFailure', 'recordUncertainResult', 'markUnchargedFailure']);
+});
+
+it('records a confirmed failure for an order nobody was charged for', function (): void {
+    // The separate path, and it cannot refund: there is nothing to give back.
+    $order = unpaidOrderAt(OrderStatus::Paid);
+    $balance = $this->floor->customer->fresh()->wallet_balance_toman;
+
+    $failed = $this->refunds->markUnchargedFailure(
+        $order, ConfirmedNoServerOutcome::FailureBeforeProviderCreate,
     );
 
     expect($failed->status)->toBe(OrderStatus::Failed)
-        ->and($failed->failure_category)->toBe(OrderFailureCategory::UncertainResult)
         ->and($this->floor->customer->fresh()->wallet_balance_toman)->toBe($balance)
         ->and(WalletTransaction::query()->where('idempotency_key', $order->refundIdempotencyKey())->count())
         ->toBe(0)
         ->and(OutboxMessage::query()->count())->toBe(0);
 });
 
-it('does not refund an order left needing attention', function (): void {
-    // needs_attention is where an uncertain outcome waits for a person.
-    $order = paidOrder();
-    DB::table('orders')->where('id', $order->id)->update(['status' => OrderStatus::NeedsAttention->value]);
+it('leaves an order needing attention exactly where it is', function (): void {
+    // needs_attention is where an uncertain outcome waits for a person. Nothing
+    // automatic moves it, and nothing automatic pays it back.
+    $order = $this->refunds->recordUncertainResult(provisioningOrder(), 'timed out');
     $balance = $this->floor->customer->fresh()->wallet_balance_toman;
 
-    // Nothing automatic moves it. Only an explicit confirmed outcome does.
     expect($order->fresh()->status)->toBe(OrderStatus::NeedsAttention)
         ->and($this->floor->customer->fresh()->wallet_balance_toman)->toBe($balance)
-        ->and(OutboxMessage::query()->count())->toBe(0);
+        ->and(OutboxMessage::query()->count())->toBe(0)
+        ->and(AuditLog::query()->where('event', AuditEvent::OrderRefunded)->count())->toBe(0);
 });
 
 it('refunds once when the decision is reached twice', function (): void {
@@ -198,7 +312,11 @@ it('resumes a refund for an order already marked failed', function (): void {
     $order = paidOrder();
     $charged = $this->floor->customer->fresh()->wallet_balance_toman;
 
-    $this->refunds->markFailedWithoutRefund($order, OrderFailureCategory::ProviderRejectedNoServer);
+    // Left failed by an earlier partial attempt; the refund still has to happen.
+    DB::table('orders')->where('id', $order->id)->update([
+        'status' => OrderStatus::Failed->value,
+        'failure_category' => OrderFailureCategory::ProviderRejectedNoServer->value,
+    ]);
 
     $refunded = $this->refunds->refundConfirmedFailure(
         $order->fresh(), ConfirmedNoServerOutcome::ProviderRejectedNoServer,

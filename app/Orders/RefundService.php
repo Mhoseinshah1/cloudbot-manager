@@ -15,6 +15,7 @@ use App\Models\Order;
 use App\Models\User;
 use App\Models\WalletTransaction;
 use App\Orders\Exceptions\RefundNotPermitted;
+use App\Orders\Exceptions\UncertainOutcomeNotApplicable;
 use App\Outbox\OutboxTopic;
 use App\Outbox\OutboxWriter;
 use App\Support\Secrets\SecretScrubber;
@@ -137,26 +138,85 @@ final readonly class RefundService
     }
 
     /**
-     * Record a failure without giving any money back.
+     * Record that a provider create may or may not have produced a server.
      *
-     * For outcomes that are not confirmed, and for orders that were never paid.
-     * Separate from the refund path on purpose: an uncertain result has to be
-     * recordable, and if recording it shared a method with refunding it, the
-     * difference would come down to an argument somebody could get wrong.
+     * This is not a failure and must never be recorded as one. A request that
+     * timed out after the provider received it looks exactly like one that was
+     * refused, and the difference is a real machine somewhere. So the order
+     * moves to needs_attention — where a person or a reconciliation sweep will
+     * look — and stays fully charged. Marking it failed would put it one step
+     * from refunded, which is how a customer ends up with both their money and
+     * their server.
+     *
+     * Only reachable from provisioning, because that is the only state with a
+     * request actually in flight. There is deliberately no public method that
+     * takes an arbitrary failure category: a charged order whose failure is
+     * confirmed has money owed back, and refundConfirmedFailure() is the only
+     * way to record that outcome.
+     *
+     * Idempotent: an order already parked with this same fact is returned
+     * unchanged, without a second audit entry.
      */
-    public function markFailedWithoutRefund(
-        Order $order,
-        OrderFailureCategory $category,
-        ?string $reason = null,
-    ): Order {
-        return DB::transaction(function () use ($order, $category, $reason): Order {
+    public function recordUncertainResult(Order $order, ?string $reason = null): Order
+    {
+        return DB::transaction(function () use ($order, $reason): Order {
             $locked = Order::query()->whereKey($order->getKey())->lockForUpdate()->first();
 
             if (! $locked instanceof Order) {
                 throw new ModelNotFoundException('That order no longer exists.');
             }
 
-            return $this->writeFailure($locked, $category, $reason);
+            if ($locked->status === OrderStatus::NeedsAttention
+                && $locked->failure_category === OrderFailureCategory::UncertainResult) {
+                // Already recorded, by an earlier call or a concurrent one.
+                return $locked;
+            }
+
+            if ($locked->status !== OrderStatus::Provisioning) {
+                throw UncertainOutcomeNotApplicable::from($locked->status);
+            }
+
+            return $this->writeOutcome(
+                $locked,
+                OrderStatus::NeedsAttention,
+                OrderFailureCategory::UncertainResult,
+                $reason,
+                AuditEvent::OrderNeedsAttention,
+            );
+        });
+    }
+
+    /**
+     * Record a confirmed failure for an order nobody was charged for.
+     *
+     * Kept separate from the charged path rather than shared with a flag. An
+     * unpaid order that failed owes nothing; a charged one owes the full
+     * amount, and no argument to a single method should be what decides which.
+     * This one refuses outright if a charge exists, so it cannot become a way
+     * to leave a paying customer out of pocket.
+     */
+    public function markUnchargedFailure(
+        Order $order,
+        ConfirmedNoServerOutcome $outcome,
+        ?string $reason = null,
+    ): Order {
+        return DB::transaction(function () use ($order, $outcome, $reason): Order {
+            $locked = Order::query()->whereKey($order->getKey())->lockForUpdate()->first();
+
+            if (! $locked instanceof Order) {
+                throw new ModelNotFoundException('That order no longer exists.');
+            }
+
+            if ($this->findCommittedCharge($locked) instanceof WalletTransaction) {
+                // The customer paid. Their money has to come back, and that is
+                // refundConfirmedFailure()'s job, not this one's.
+                throw RefundNotPermitted::because(
+                    RefundRefusalReason::OrderNotRefundable,
+                    'That order was charged; a confirmed failure must be refunded, not merely recorded.',
+                );
+            }
+
+            return $this->markFailed($locked, $outcome, $reason);
         });
     }
 
@@ -192,12 +252,7 @@ final readonly class RefundService
      */
     private function requireCommittedCharge(Order $order): WalletTransaction
     {
-        $charge = WalletTransaction::query()
-            ->where('user_id', $order->user_id)
-            ->where('idempotency_key', $order->paymentIdempotencyKey())
-            ->where('type', WalletTransactionType::Debit->value)
-            ->where('amount_toman', -$order->total_toman)
-            ->first();
+        $charge = $this->findCommittedCharge($order);
 
         if (! $charge instanceof WalletTransaction) {
             throw RefundNotPermitted::because(
@@ -207,6 +262,21 @@ final readonly class RefundService
         }
 
         return $charge;
+    }
+
+    /**
+     * The debit that took this customer's money for this order, if there is one.
+     */
+    private function findCommittedCharge(Order $order): ?WalletTransaction
+    {
+        $charge = WalletTransaction::query()
+            ->where('user_id', $order->user_id)
+            ->where('idempotency_key', $order->paymentIdempotencyKey())
+            ->where('type', WalletTransactionType::Debit->value)
+            ->where('amount_toman', -$order->total_toman)
+            ->first();
+
+        return $charge instanceof WalletTransaction ? $charge : null;
     }
 
     /**
@@ -234,7 +304,23 @@ final readonly class RefundService
         OrderFailureCategory $category,
         ?string $reason,
     ): Order {
-        $failed = $this->states->transition($order, $order->status, OrderStatus::Failed, [
+        return $this->writeOutcome($order, OrderStatus::Failed, $category, $reason, AuditEvent::OrderFailed);
+    }
+
+    /**
+     * Write an outcome's state and its explanation together.
+     *
+     * One statement, so an order can never be sitting in an outcome state
+     * without the reason it got there.
+     */
+    private function writeOutcome(
+        Order $order,
+        OrderStatus $target,
+        OrderFailureCategory $category,
+        ?string $reason,
+        string $auditEvent,
+    ): Order {
+        $moved = $this->states->transition($order, $order->status, $target, [
             'failure_category' => $category->value,
             // Scrubbed. A provider error message is the most likely place for a
             // token or an Authorization header to arrive, and this column is
@@ -243,16 +329,16 @@ final readonly class RefundService
         ]);
 
         $this->audit->record(
-            AuditEvent::OrderFailed,
-            subject: $failed,
-            after: ['status' => $failed->status->value],
+            $auditEvent,
+            subject: $moved,
+            after: ['status' => $moved->status->value],
             metadata: [
-                'order_id' => $failed->getKey(),
-                'order_number' => $failed->order_number,
+                'order_id' => $moved->getKey(),
+                'order_number' => $moved->order_number,
                 'failure_category' => $category->value,
             ],
         );
 
-        return $failed;
+        return $moved;
     }
 }

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Orders\Data;
 
+use App\Enums\ImageSelectionMode;
 use App\Models\ProductLocationPrice;
 use App\Models\User;
 
@@ -35,4 +36,16 @@ final readonly class PurchaseIntent
         /** Chosen operating system image, or null to take the location's default. */
         public ?int $providerImageId = null,
     ) {}
+
+    /**
+     * Whether this intent names an image or asks for the location's default.
+     *
+     * A real part of the purchase, not an implementation detail: the two are
+     * different requests, and the order records which one it was so that a
+     * retry switching between them is recognised as a different purchase.
+     */
+    public function imageSelectionMode(): ImageSelectionMode
+    {
+        return $this->providerImageId === null ? ImageSelectionMode::Default : ImageSelectionMode::Explicit;
+    }
 }

@@ -2,9 +2,12 @@
 
 declare(strict_types=1);
 
+use App\Audit\AuditEvent;
 use App\Authorization\RoleProvisioner;
 use App\Enums\ConfirmedNoServerOutcome;
+use App\Enums\OrderFailureCategory;
 use App\Enums\OrderStatus;
+use App\Models\AuditLog;
 use App\Models\Invoice;
 use App\Models\Order;
 use App\Models\OutboxMessage;
@@ -181,4 +184,53 @@ it('lets only one competing transition win from the same expected state', functi
 
     expect($winners)->toHaveCount(1)
         ->and(Order::query()->findOrFail($orderId)->status)->toBe(OrderStatus::Provisioning);
+});
+
+it('parks an uncertain outcome once when it is reported concurrently', function (): void {
+    $orders = app(OrderService::class);
+    $order = app(OrderStateMachine::class)->transition(
+        $orders->payFromWallet(
+            $orders->awaitPayment($orders->place(new PurchaseIntent(
+                $this->floor->customer, $this->floor->catalog->price,
+                SalesFloor::AUP_VERSION, true, (string) Str::uuid(),
+            ))),
+            $this->floor->customer,
+        ),
+        OrderStatus::Paid,
+        OrderStatus::Provisioning,
+    );
+
+    $orderId = $order->id;
+    $customerId = $this->floor->customer->id;
+    $charged = User::query()->findOrFail($customerId)->wallet_balance_toman;
+
+    $results = ForkedWorkers::run(4, function () use ($orderId): array {
+        try {
+            $parked = app(RefundService::class)->recordUncertainResult(
+                Order::query()->findOrFail($orderId),
+                'provider create timed out',
+            );
+
+            return ['status' => $parked->status->value];
+        } catch (Throwable $exception) {
+            return ['error' => $exception::class];
+        }
+    });
+
+    // Every worker agrees on the outcome; none of them fails, and none of them
+    // turns an unknown result into a refundable failure.
+    expect(array_column($results, 'status'))
+        ->toBe(array_fill(0, 4, OrderStatus::NeedsAttention->value));
+
+    $fresh = Order::query()->findOrFail($orderId);
+
+    expect($fresh->status)->toBe(OrderStatus::NeedsAttention)
+        ->and($fresh->failure_category)->toBe(OrderFailureCategory::UncertainResult)
+        // No refund, no outbox message, no money moved: a human decides next.
+        ->and(WalletTransaction::query()->where('idempotency_key', $fresh->refundIdempotencyKey())->count())
+        ->toBe(0)
+        ->and(OutboxMessage::query()->count())->toBe(0)
+        ->and(User::query()->findOrFail($customerId)->wallet_balance_toman)->toBe($charged)
+        // Recorded exactly once, however many workers reported it.
+        ->and(AuditLog::query()->where('event', AuditEvent::OrderNeedsAttention)->count())->toBe(1);
 });
