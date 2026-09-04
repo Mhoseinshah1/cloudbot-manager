@@ -1,0 +1,209 @@
+# CloudBot Manager production topology.
+#
+# Only nginx publishes a host port, and it binds to localhost by default.
+# PostgreSQL and Redis are reachable only on the internal network. Public TLS
+# terminates at the host's own nginx, in front of this stack.
+#
+# Migrations are not run by any container on start. They run as an explicit
+# deployment step with the workers stopped.
+
+name: cloudbot-manager
+
+x-app-image: &app-image
+  image: cloudbot-manager-app:${APP_IMAGE_TAG:-latest}
+  build:
+    context: .
+    dockerfile: docker/php/Dockerfile
+    target: app
+
+x-app-env: &app-env
+  env_file:
+    - .env
+
+# Docker owns log rotation. Without it a busy worker fills the host disk.
+x-logging: &logging
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+x-worker-depends: &worker-depends
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+
+services:
+
+  app:
+    <<: [*app-image, *app-env, *logging]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # PHP-FPM serves no HTTP, so the CLI check is used. It shares its
+      # implementation with the HTTP endpoint.
+      test: ["CMD", "php", "artisan", "app:health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    mem_limit: ${APP_MEMORY_LIMIT:-512m}
+    networks: [internal]
+
+  nginx:
+    image: cloudbot-manager-nginx:${APP_IMAGE_TAG:-latest}
+    build:
+      context: .
+      dockerfile: docker/php/Dockerfile
+      target: nginx
+    <<: *logging
+    restart: unless-stopped
+    # Localhost by default. Exposing this publicly would bypass the host's TLS.
+    ports:
+      - "${APP_BIND_IP:-127.0.0.1}:${APP_PORT:-8080}:80"
+    depends_on:
+      app:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    mem_limit: ${NGINX_MEMORY_LIMIT:-128m}
+    networks: [internal]
+
+  postgres:
+    image: postgres:16-alpine
+    <<: *logging
+    restart: unless-stopped
+    # No ports section: the database is never reachable from the host network.
+    environment:
+      POSTGRES_DB: ${DB_DATABASE:?DB_DATABASE must be set}
+      POSTGRES_USER: ${DB_USERNAME:?DB_USERNAME must be set}
+      # No default. A fallback here would become a known production password.
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD must be set}
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    mem_limit: ${POSTGRES_MEMORY_LIMIT:-1g}
+    networks: [internal]
+
+  redis:
+    image: redis:7-alpine
+    <<: *logging
+    restart: unless-stopped
+    # No ports section: Redis is never reachable from the host network.
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    # appendonly: queued jobs and bot state must survive a restart.
+    # noeviction: this Redis holds queues, conversation state and locks, none
+    # of which may be silently dropped under memory pressure. Failing a write
+    # loudly is correct here; discarding a queued job is not.
+    command:
+      - sh
+      - -c
+      - |
+        if [ -n "$$REDIS_PASSWORD" ]; then
+          exec redis-server --appendonly yes --maxmemory-policy noeviction --requirepass "$$REDIS_PASSWORD"
+        else
+          exec redis-server --appendonly yes --maxmemory-policy noeviction
+        fi
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - |
+          if [ -n "$$REDIS_PASSWORD" ]; then
+            redis-cli -a "$$REDIS_PASSWORD" --no-auth-warning ping | grep -q PONG
+          else
+            redis-cli ping | grep -q PONG
+          fi
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    mem_limit: ${REDIS_MEMORY_LIMIT:-512m}
+    networks: [internal]
+
+  # Interactive bot work. Short timeout, so a stuck job cannot hold a slot for
+  # long. Kept separate from provisioning: a slow provider call must never
+  # delay a customer's next bot reply.
+  telegram-worker:
+    <<: [*app-image, *app-env, *logging, *worker-depends]
+    restart: unless-stopped
+    command: ["php", "artisan", "queue:work", "redis", "--queue=telegram,default", "--tries=3", "--timeout=30", "--max-time=3600", "--sleep=1"]
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'queue:work' > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    stop_grace_period: 40s
+    mem_limit: ${WORKER_MEMORY_LIMIT:-384m}
+    networks: [internal]
+
+  # Provider provisioning. Long timeout and a single process: creating a server
+  # is slow, and concurrency against a provider API buys nothing but rate
+  # limits.
+  provisioning-worker:
+    <<: [*app-image, *app-env, *logging, *worker-depends]
+    restart: unless-stopped
+    command: ["php", "artisan", "queue:work", "redis", "--queue=provisioning", "--tries=3", "--timeout=600", "--max-time=3600", "--sleep=2"]
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'queue:work' > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    stop_grace_period: 620s
+    mem_limit: ${WORKER_MEMORY_LIMIT:-384m}
+    networks: [internal]
+
+  notification-worker:
+    <<: [*app-image, *app-env, *logging, *worker-depends]
+    restart: unless-stopped
+    command: ["php", "artisan", "queue:work", "redis", "--queue=notifications", "--tries=5", "--timeout=60", "--max-time=3600", "--sleep=1"]
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'queue:work' > /dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    stop_grace_period: 70s
+    mem_limit: ${WORKER_MEMORY_LIMIT:-384m}
+    networks: [internal]
+
+  scheduler:
+    <<: [*app-image, *app-env, *logging, *worker-depends]
+    restart: unless-stopped
+    command: ["php", "artisan", "schedule:work"]
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'schedule:work' > /dev/null || exit 1"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    mem_limit: ${WORKER_MEMORY_LIMIT:-384m}
+    networks: [internal]
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
