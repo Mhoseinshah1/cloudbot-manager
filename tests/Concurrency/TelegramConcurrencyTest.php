@@ -2,12 +2,14 @@
 
 declare(strict_types=1);
 
+use App\Jobs\ProcessTelegramUpdateJob;
 use App\Models\TelegramAccount;
 use App\Models\TelegramUpdate;
 use App\Models\User;
 use App\Telegram\TelegramUpdateNormalizer;
 use App\Telegram\TelegramUpdateRecorder;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
 use Tests\Support\Concurrency\ForkedWorkers;
 
 /**
@@ -150,4 +152,75 @@ it('lets exactly one worker mark an update processed', function (): void {
     // cannot both believe they were the one that finished it.
     expect($winners)->toHaveCount(1)
         ->and(TelegramUpdate::query()->findOrFail($updateId)->processed_at)->not->toBeNull();
+});
+
+it('lets exactly one worker enter processing, not merely finish it', function (): void {
+    // The markProcessed race above proves only that one worker wins the last
+    // write. That is not the guarantee that matters: a Telegram message is
+    // already delivered by the time the compare-and-set runs, so what has to be
+    // true is that only one worker ever reaches the processor at all.
+    //
+    // Every child fakes its own HTTP, so what each one reports is the number of
+    // Telegram calls that process actually made — a probe at the processing
+    // boundary rather than at its conclusion.
+    config()->set('telegram.api_base_url', 'https://api.telegram.test');
+    config()->set('telegram.bot_token', '11'.random_int(1_000_000, 9_999_999).':AA'.bin2hex(random_bytes(12)));
+
+    $payload = payloadFor(880500, 5_500_123_456);
+    $normalized = app(TelegramUpdateNormalizer::class)->normalize($payload);
+    $update = app(TelegramUpdateRecorder::class)->record($normalized)['update'];
+    $updateId = (int) $update->getKey();
+
+    $results = ForkedWorkers::run(6, function () use ($updateId): array {
+        Http::fake(['api.telegram.test/*' => Http::response(['ok' => true, 'result' => ['message_id' => 1]])]);
+        Http::preventStrayRequests();
+
+        app()->call([new ProcessTelegramUpdateJob($updateId), 'handle']);
+
+        return ['sent' => Http::recorded()->count()];
+    });
+
+    $sends = array_map(static fn (array $r): int => (int) ($r['sent'] ?? 0), $results);
+    $entered = array_filter($sends);
+
+    expect(array_filter(array_column($results, 'error')))->toBe([])
+        // One process greeted the customer. The other five reached the lock,
+        // found it taken, and did nothing at all.
+        ->and(array_sum($sends))->toBe(1)
+        ->and($entered)->toHaveCount(1)
+        ->and(User::query()->count())->toBe(1)
+        ->and(TelegramAccount::query()->count())->toBe(1)
+        ->and(TelegramUpdate::query()->findOrFail($updateId)->status->value)->toBe('processed');
+});
+
+it('does not process again once an earlier worker has finished', function (): void {
+    // The sequential shape: the lock is free, because whoever held it is done.
+    // A worker arriving now must decide from what that worker left behind.
+    $payload = payloadFor(880600, 6_600_222_222);
+    $normalized = app(TelegramUpdateNormalizer::class)->normalize($payload);
+    $update = app(TelegramUpdateRecorder::class)->record($normalized)['update'];
+    $updateId = (int) $update->getKey();
+
+    app(TelegramUpdateRecorder::class)->markProcessed($update);
+
+    config()->set('telegram.api_base_url', 'https://api.telegram.test');
+    config()->set('telegram.bot_token', '11'.random_int(1_000_000, 9_999_999).':AA'.bin2hex(random_bytes(12)));
+
+    $results = ForkedWorkers::run(6, function () use ($updateId): array {
+        Http::fake(['api.telegram.test/*' => Http::response(['ok' => true, 'result' => ['message_id' => 1]])]);
+        Http::preventStrayRequests();
+
+        app()->call([new ProcessTelegramUpdateJob($updateId), 'handle']);
+
+        return ['sent' => Http::recorded()->count()];
+    });
+
+    $sends = array_map(static fn (array $r): int => (int) ($r['sent'] ?? 0), $results);
+
+    // Six workers, an uncontended lock each, and not one Telegram call between
+    // them.
+    expect(array_filter(array_column($results, 'error')))->toBe([])
+        ->and(array_sum($sends))->toBe(0)
+        ->and(User::query()->count())->toBe(0)
+        ->and(TelegramAccount::query()->count())->toBe(0);
 });

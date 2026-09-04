@@ -40,6 +40,17 @@ use Throwable;
  * Running twice for one update is safe and expected: Telegram retries, and a
  * dispatch can be duplicated. The row's status is the guard, and the work
  * itself is a greeting rather than anything that spends money.
+ *
+ * That guard is not exactly-once, and the Redis lock does not make it so. No
+ * database flag can be committed atomically with an external send: a worker
+ * that dies after Telegram accepted a message but before the row is marked
+ * will send it again on retry. What the lock and the re-read below remove is
+ * the avoidable case — two healthy workers duplicating an effect purely
+ * because one of them decided from a row it read before the other finished.
+ * The unavoidable case remains, and for this phase it is limited to
+ * presentation: a repeated greeting. Anything that moves money or builds a
+ * server must carry its own durable idempotency tied to the business intent
+ * rather than relying on this.
  */
 final class ProcessTelegramUpdateJob implements ShouldQueue
 {
@@ -70,19 +81,11 @@ final class ProcessTelegramUpdateJob implements ShouldQueue
         TelegramAccountService $accounts,
         CacheFactory $cache,
     ): void {
-        $update = TelegramUpdate::query()->whereKey($this->telegramUpdateId)->first();
-
-        if (! $update instanceof TelegramUpdate) {
-            // Nothing to do, and nothing a retry could fix.
-            return;
-        }
-
-        if (! $update->isPending()) {
-            // Already handled. The common case for a duplicated dispatch, and
-            // deliberately silent.
-            return;
-        }
-
+        // Nothing is read before the lock, deliberately. The lock key is built
+        // from the payload alone, and a row read beforehand describes the world
+        // as it was before whoever currently holds the lock finished with it —
+        // so acting on one is acting on an answer that has already expired.
+        //
         // Coordination only, and short-lived. Two workers handling one update
         // would send a customer the menu twice; neither the lock nor its
         // absence is what makes the system correct, which is why a crashed
@@ -113,6 +116,23 @@ final class ProcessTelegramUpdateJob implements ShouldQueue
         }
 
         try {
+            // Read now, holding the lock, so what this decides on is what the
+            // last holder left behind rather than what was true before them.
+            $update = TelegramUpdate::query()->whereKey($this->telegramUpdateId)->first();
+
+            if (! $update instanceof TelegramUpdate) {
+                // Nothing to do, and nothing a retry could fix.
+                return;
+            }
+
+            if (! $update->isPending()) {
+                // Somebody finished it while this worker was waiting. Nothing
+                // is sent and nothing is written: losing the markProcessed
+                // compare-and-set afterwards would be too late, because it
+                // cannot recall a message Telegram has already delivered.
+                return;
+            }
+
             $this->run($update, $recorder, $processor, $accounts);
         } finally {
             try {

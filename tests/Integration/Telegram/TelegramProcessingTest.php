@@ -19,6 +19,7 @@ use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Queue;
+use Tests\Support\Cache\HookedLockStore;
 use Tests\Support\Cache\LocklessStore;
 
 /**
@@ -514,4 +515,85 @@ it('gives the lock back when it is finished, success or failure', function (): v
     expect($afterFailure->get())->toBeTrue();
 
     $afterFailure->release();
+});
+
+it('re-reads the update after taking the lock, not before', function (): void {
+    telegramOk();
+    $update = recordUpdate(startPayload(701700));
+
+    // Worker A, made deterministic: it finishes and commits in exactly the
+    // instant this worker takes the lock — after any pre-lock read would have
+    // happened, before any processing can. No sleep, no timing luck.
+    $store = new HookedLockStore(function () use ($update): void {
+        app(TelegramUpdateRecorder::class)->markProcessed($update->fresh());
+    });
+
+    Cache::extend('hooked', fn (): Repository => new Repository($store));
+    config()->set('cache.stores.locks', ['driver' => 'hooked']);
+    Cache::forgetDriver('locks');
+
+    $processedAt = $update->fresh()->processed_at;
+
+    expect($processedAt)->toBeNull();
+
+    runJob($update);
+
+    // Deciding from a row read before the lock would send a second greeting to
+    // a customer who has already had one.
+    Http::assertNothingSent();
+
+    $fresh = $update->fresh();
+
+    expect($fresh->status)->toBe(TelegramUpdateStatus::Processed)
+        ->and(User::query()->count())->toBe(0)
+        ->and(TelegramAccount::query()->count())->toBe(0)
+        // Worker A's completion stands; this worker overwrote nothing.
+        ->and($fresh->processed_at->toIso8601String())
+        ->toBe($update->fresh()->processed_at->toIso8601String())
+        // And it really did lock, on the real key, before deciding anything.
+        ->and($store->acquiredNames())->toBe(['telegram:update:'.$update->getKey()]);
+});
+
+it('still processes an update the lock hand-over left pending', function (): void {
+    telegramOk();
+    $update = recordUpdate(startPayload(701800));
+
+    // The same hand-over, except the previous holder left the update unfinished
+    // — a worker that crashed, or one Telegram rate-limited. Re-reading must
+    // not turn "check again" into "never handle it".
+    $store = new HookedLockStore(function () use ($update): void {
+        app(TelegramUpdateRecorder::class)->markFailed($update->fresh(), 'rate_limited');
+    });
+
+    Cache::extend('hooked', fn (): Repository => new Repository($store));
+    config()->set('cache.stores.locks', ['driver' => 'hooked']);
+    Cache::forgetDriver('locks');
+
+    runJob($update);
+
+    expect($update->fresh()->status)->toBe(TelegramUpdateStatus::Processed)
+        ->and(User::query()->count())->toBe(1)
+        ->and(Http::recorded()->count())->toBe(1);
+});
+
+it('reads nothing about the update before it holds the lock', function (): void {
+    telegramOk();
+    $update = recordUpdate(startPayload(701900));
+
+    // Deleted between dispatch and handling. A job that read the row before
+    // locking would have found it; this one must cope with finding nothing.
+    $store = new HookedLockStore(function () use ($update): void {
+        TelegramUpdate::query()->whereKey($update->getKey())->delete();
+    });
+
+    Cache::extend('hooked', fn (): Repository => new Repository($store));
+    config()->set('cache.stores.locks', ['driver' => 'hooked']);
+    Cache::forgetDriver('locks');
+
+    runJob($update);
+
+    Http::assertNothingSent();
+
+    expect(TelegramUpdate::query()->count())->toBe(0)
+        ->and(User::query()->count())->toBe(0);
 });
