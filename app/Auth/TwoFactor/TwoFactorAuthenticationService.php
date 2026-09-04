@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Auth\TwoFactor;
 
 use App\Models\User;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use PragmaRX\Google2FA\Google2FA;
 
@@ -98,40 +99,82 @@ final class TwoFactorAuthenticationService
     }
 
     /**
+     * Verify a second-factor challenge.
+     *
+     * Accepts either a current TOTP code or an unused recovery code. The caller
+     * is told only whether the attempt succeeded: distinguishing "wrong TOTP"
+     * from "wrong recovery code" would tell an attacker which of the two they
+     * are closer to guessing.
+     */
+    public function verifyChallenge(User $user, string $code): bool
+    {
+        if ($this->verifyCode($user, $code)) {
+            return true;
+        }
+
+        return $this->consumeRecoveryCode($user, $code);
+    }
+
+    /**
      * Spend a recovery code, if it matches an unused one.
      *
-     * Each code works once: it is removed on use, so a code read off a screen
-     * or a printout cannot be replayed.
+     * The row is locked and re-read inside the transaction rather than trusting
+     * the copy already in memory. Two requests arriving with the same code at
+     * the same time would otherwise both read the code as unused and both
+     * succeed, which would make a single-use credential reusable.
      */
     public function consumeRecoveryCode(User $user, string $code): bool
     {
-        $codes = $user->two_factor_recovery_codes;
+        $candidate = trim($code);
 
-        if (! is_array($codes) || $codes === []) {
+        if ($candidate === '') {
             return false;
         }
 
-        $candidate = trim($code);
-        $remaining = [];
-        $matched = false;
+        $consumed = DB::transaction(function () use ($user, $candidate): bool {
+            /** @var User|null $locked */
+            $locked = User::query()->whereKey($user->getKey())->lockForUpdate()->first();
 
-        foreach ($codes as $stored) {
-            // Constant-time comparison: recovery codes are credentials, and
-            // a length-dependent comparison leaks how much of one is right.
-            if (! $matched && is_string($stored) && hash_equals($stored, $candidate)) {
-                $matched = true;
-
-                continue;
+            if (! $locked instanceof User) {
+                return false;
             }
 
-            $remaining[] = $stored;
+            $codes = $locked->two_factor_recovery_codes;
+
+            if (! is_array($codes) || $codes === []) {
+                return false;
+            }
+
+            $remaining = [];
+            $matched = false;
+
+            foreach ($codes as $stored) {
+                // Constant-time comparison: recovery codes are credentials, and
+                // a length-dependent comparison leaks how much of one is right.
+                if (! $matched && is_string($stored) && hash_equals($stored, $candidate)) {
+                    $matched = true;
+
+                    continue;
+                }
+
+                $remaining[] = $stored;
+            }
+
+            if (! $matched) {
+                return false;
+            }
+
+            $locked->forceFill(['two_factor_recovery_codes' => $remaining])->save();
+
+            return true;
+        });
+
+        if ($consumed) {
+            // The caller's instance still holds the pre-consumption list.
+            $user->refresh();
         }
 
-        if ($matched) {
-            $user->forceFill(['two_factor_recovery_codes' => $remaining])->save();
-        }
-
-        return $matched;
+        return $consumed;
     }
 
     /**

@@ -7,6 +7,7 @@ namespace App\Filament\Pages;
 use App\Audit\AuditEvent;
 use App\Audit\AuditRecorder;
 use App\Auth\TwoFactor\TwoFactorAuthenticationService;
+use App\Auth\TwoFactor\TwoFactorSession;
 use App\Models\User;
 use BaconQrCode\Renderer\Image\SvgImageBackEnd;
 use BaconQrCode\Renderer\ImageRenderer;
@@ -49,6 +50,15 @@ class TwoFactorSetup extends Page
         $user = $this->admin();
 
         $this->confirmed = $user->hasConfirmedTwoFactor();
+
+        // Re-enrolment would let a stolen password swap in a new device and
+        // defeat the second factor, so an enrolled account is sent to the
+        // challenge instead. Resetting a lost device is an operator action.
+        if ($this->confirmed && ! app(TwoFactorSession::class)->isVerifiedFor($user)) {
+            $this->redirect(TwoFactorChallenge::getUrl());
+
+            return;
+        }
 
         if (! $this->confirmed) {
             $this->secret = app(TwoFactorAuthenticationService::class)->startEnrolment($user);
@@ -108,6 +118,10 @@ class TwoFactorSetup extends Page
             actor: $user,
             subject: $user,
         );
+
+        // They just proved possession of the factor, which is exactly what the
+        // challenge asks for, so this session does not need to ask again.
+        app(TwoFactorSession::class)->markVerified($user);
 
         // Shown once. They are stored encrypted and cannot be displayed again.
         $this->recoveryCodes = $codes;

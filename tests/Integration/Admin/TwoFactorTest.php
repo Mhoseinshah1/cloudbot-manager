@@ -45,10 +45,25 @@ it('still lets an unenrolled administrator reach the enrolment page', function (
         ->assertSuccessful();
 });
 
-it('lets an enrolled administrator through', function (): void {
+it('does not let being enrolled substitute for answering the challenge', function (): void {
+    // This previously passed on the strength of two_factor_confirmed_at alone,
+    // which is enrolment, not authentication. Enrolment is a property of the
+    // account; what grants access is proving possession in this session.
     $this->admin->forceFill(['two_factor_confirmed_at' => now()])->save();
 
-    $this->actingAs($this->admin)->get('/admin')->assertSuccessful();
+    $this->actingAs($this->admin)
+        ->get('/admin')
+        ->assertRedirect(App\Filament\Pages\TwoFactorChallenge::getUrl());
+});
+
+it('lets an enrolled administrator through once the session has passed a challenge', function (): void {
+    $secret = $this->service->startEnrolment($this->admin);
+    $this->service->confirm($this->admin, app(Google2FA::class)->getCurrentOtp($secret));
+
+    $this->actingAs($this->admin->fresh());
+    app(App\Auth\TwoFactor\TwoFactorSession::class)->markVerified($this->admin->fresh());
+
+    $this->get('/admin')->assertSuccessful();
 });
 
 it('does not treat an issued but unconfirmed secret as enrolled', function (): void {

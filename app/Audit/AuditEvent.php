@@ -25,6 +25,8 @@ final class AuditEvent
 
     public const TwoFactorConfirmed = 'admin.two_factor_confirmed';
 
+    public const TwoFactorChallengePassed = 'admin.two_factor_challenge_passed';
+
     public const TwoFactorReset = 'admin.two_factor_reset';
 
     public const SettingChanged = 'setting.changed';

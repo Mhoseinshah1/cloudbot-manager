@@ -131,10 +131,24 @@ php artisan db:seed --class=Database\\Seeders\\RolePermissionSeeder
 
 ### Two-factor authentication
 
-Privileged accounts require TOTP. An administrator who has not enrolled can
-reach only the enrolment page; everything else in the panel redirects there
-until they confirm a code. Secrets and recovery codes are encrypted at rest and
-are never written to logs or the audit trail.
+Signing in takes two steps. A correct password establishes who someone claims
+to be; it grants no privileged access on its own. The session then has to pass a
+challenge — a current TOTP code, or one unused recovery code — before any other
+page in the panel will load.
+
+An administrator who has not enrolled can reach only the enrolment page. One who
+has enrolled is sent to the challenge and is deliberately *not* allowed back
+into enrolment, since that would let a stolen password register a new device.
+
+The proof lives in the session and is bound to the account that earned it, so it
+does not carry over to another user and does not survive logout. There is no
+database flag recording that an account has "passed 2FA": such a flag would
+outlive the session and make a stolen password sufficient again. A new sign-in
+means a new challenge.
+
+Repeated failures are rate limited per account — a delay, not a lockout. Secrets
+and recovery codes are encrypted at rest, single-use in the case of recovery
+codes, and never written to the session, logs or the audit trail.
 
 The requirement can be relaxed outside production for automated tests. In
 production it always applies, regardless of configuration.

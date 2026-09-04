@@ -4,8 +4,9 @@ declare(strict_types=1);
 
 namespace App\Providers\Filament;
 
+use App\Filament\Pages\TwoFactorChallenge;
 use App\Filament\Pages\TwoFactorSetup;
-use App\Http\Middleware\RequireTwoFactorEnrolment;
+use App\Http\Middleware\RequireTwoFactorAuthentication;
 use Filament\Http\Middleware\Authenticate;
 use Filament\Http\Middleware\AuthenticateSession;
 use Filament\Http\Middleware\DisableBladeIconComponents;
@@ -45,9 +46,10 @@ class AdminPanelProvider extends PanelProvider
             ->colors(['primary' => Color::Slate])
             ->pages([
                 Dashboard::class,
-                // Registered on the panel so an administrator who has not yet
-                // enrolled has somewhere the middleware can send them.
+                // Registered on the panel so the middleware has somewhere to
+                // send an administrator who still owes a second factor.
                 TwoFactorSetup::class,
+                TwoFactorChallenge::class,
             ])
             ->middleware([
                 EncryptCookies::class,
@@ -62,9 +64,9 @@ class AdminPanelProvider extends PanelProvider
             ])
             ->authMiddleware([
                 Authenticate::class,
-                // After authentication, so an unenrolled administrator is
-                // redirected to enrolment rather than to the login page.
-                RequireTwoFactorEnrolment::class,
+                // After authentication, so a password-only session is held at
+                // the second factor rather than sent back to the login page.
+                RequireTwoFactorAuthentication::class,
             ]);
     }
 }
