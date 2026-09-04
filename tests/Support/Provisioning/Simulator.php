@@ -35,4 +35,20 @@ final class Simulator
     {
         return new FakeProvider(new FakeCatalog);
     }
+
+    /**
+     * Install a provider that offers only the core contract.
+     *
+     * For the tests about capabilities: an adapter declines to offer power or
+     * reboot by simply not implementing the interface, and what must follow is
+     * that no button appears and no request is accepted.
+     */
+    public static function coreOnly(): \Tests\Support\Servers\CoreOnlyProvider
+    {
+        $limited = new \Tests\Support\Servers\CoreOnlyProvider(new FakeProvider(new FakeCatalog));
+
+        app()->instance(FakeProvider::class, $limited);
+
+        return $limited;
+    }
 }

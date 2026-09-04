@@ -9,6 +9,7 @@ use App\Models\TelegramAccount;
 use App\Models\TelegramUpdate;
 use App\Models\User;
 use App\Support\Queues;
+use App\Telegram\Flows\BuyMessages;
 use App\Telegram\TelegramUpdateNormalizer;
 use App\Telegram\TelegramUpdateRecorder;
 use Illuminate\Cache\Repository;
@@ -267,7 +268,7 @@ it('acknowledges a button that no longer means anything, and does nothing else',
         ->and($update->fresh()->status)->toBe(TelegramUpdateStatus::Processed);
 });
 
-it('answers a not-yet-built menu entry without changing anything', function (): void {
+it('opens the buy flow without creating anything', function (): void {
     telegramOk();
     runJob(recordUpdate(startPayload(700700)));
 
@@ -290,9 +291,13 @@ it('answers a not-yet-built menu entry without changing anything', function (): 
     Http::assertSent(function (Request $request): bool {
         $text = (string) $request['text'];
 
-        // A sentence in the customer's language, and nothing about phases.
+        // Nothing is configured in this test — no catalog, and no abuse
+        // ceilings — so the flow fails closed before a customer can choose
+        // anything. That is the answer being asserted: a shop with no limit
+        // configured does not sell. Said in the customer's language, and with
+        // no mention of this project's schedule.
         return str_ends_with($request->url(), '/sendMessage')
-            && str_contains($text, 'فعال نشده')
+            && str_contains($text, BuyMessages::PURCHASES_UNAVAILABLE)
             && ! str_contains(strtolower($text), 'phase');
     });
 });

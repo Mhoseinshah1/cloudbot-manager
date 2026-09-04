@@ -36,3 +36,19 @@ Schedule::command('providers:reconcile-inventory')
     ->dailyAt('03:15')
     ->withoutOverlapping()
     ->runInBackground();
+
+// The delivery half of the transactional outbox. Every minute, because these
+// are messages a customer is waiting for and work a paid order needs — an
+// order that was paid and whose provisioning job was never dispatched is
+// invisible to every other sweep, and this is what finds it.
+Schedule::command('outbox:dispatch')
+    ->everyMinute()
+    ->withoutOverlapping()
+    ->runInBackground();
+
+// The safety net under server actions. A worker can delete a machine and die
+// before recording it, and nothing else would ever notice.
+Schedule::command('server-actions:reconcile')
+    ->everyFiveMinutes()
+    ->withoutOverlapping()
+    ->runInBackground();

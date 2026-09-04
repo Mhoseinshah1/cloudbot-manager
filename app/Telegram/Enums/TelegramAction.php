@@ -41,20 +41,94 @@ enum TelegramAction: string
     /** Recognised as a request to go back to the menu. */
     case MainMenu = 'menu.main';
 
+    /*
+     * Buying a server.
+     *
+     * One case per step rather than one "buy" case carrying a step, because the
+     * step is what decides whether a customer's tap creates an order. A single
+     * case would make "which stage was this?" a question about untrusted data
+     * instead of about the closed vocabulary.
+     */
+
+    case BuyPage = 'buy.page';
+
+    case BuyProduct = 'buy.product';
+
+    case BuyLocation = 'buy.location';
+
+    case BuyImage = 'buy.image';
+
+    case BuyAcceptTerms = 'buy.accept_terms';
+
+    case BuyConfirm = 'buy.confirm';
+
+    case BuyCancel = 'buy.cancel';
+
+    /*
+     * Managing a server.
+     */
+
+    case ServerPage = 'server.page';
+
+    case ServerView = 'server.view';
+
+    case ServerPowerOn = 'server.power_on';
+
+    case ServerPowerOff = 'server.power_off';
+
+    case ServerReboot = 'server.reboot';
+
+    case ServerRevealPassword = 'server.reveal_password';
+
+    /** Asks for the confirmation screen. Deletes nothing. */
+    case ServerDelete = 'server.delete';
+
+    /** The confirmation itself. The only case that deletes anything. */
+    case ServerDeleteConfirm = 'server.delete_confirm';
+
+    /*
+     * Wallet and invoices.
+     */
+
+    case WalletPage = 'wallet.page';
+
+    case InvoicePage = 'invoice.page';
+
+    case InvoiceView = 'invoice.view';
+
     /** Something arrived that this phase has no meaning for. */
     case Unknown = 'unknown';
 
     /**
-     * Whether the customer-facing behaviour behind this entry exists yet.
+     * The six entries the main menu offers.
      *
-     * The menu deliberately shows the full Release 1.0 set from the start, so
-     * the shape of the product is honest. The four commerce entries arrive with
-     * the sales phase; until then they answer politely instead of pretending.
+     * Named here so a test can prove every one of them reaches a flow. The menu
+     * showed all six from the first phase, with four of them answering that
+     * they were not ready; they all work now, and this is what stops one
+     * quietly regressing to a polite refusal.
+     *
+     * @return list<self>
      */
-    public function isImplemented(): bool
+    public static function menuEntries(): array
+    {
+        return [
+            self::MenuBuyServer, self::MenuMyServers, self::MenuWallet,
+            self::MenuInvoices, self::MenuProfile, self::MenuHelp,
+        ];
+    }
+
+    /**
+     * Whether this action belongs to the buy flow.
+     *
+     * Used to decide what a stale tap means: a buy step arriving with no live
+     * flow is an expired conversation, which is a different thing from a menu
+     * entry, and the customer is told so rather than shown an empty screen.
+     */
+    public function isBuyStep(): bool
     {
         return in_array($this, [
-            self::Start, self::MenuProfile, self::MenuHelp, self::MainMenu, self::Unknown,
+            self::BuyPage, self::BuyProduct, self::BuyLocation, self::BuyImage,
+            self::BuyAcceptTerms, self::BuyConfirm, self::BuyCancel,
         ], strict: true);
     }
 

@@ -70,11 +70,49 @@ enum SettingKey: string
      */
     case ProvisioningStuckAfterMinutes = 'provisioning.stuck_after_minutes';
 
+    /**
+     * How many live servers one customer may hold at once.
+     *
+     * Absent or malformed blocks new purchases. That is the whole point of a
+     * limit: a system that sells without one because nobody configured it is
+     * indistinguishable, from the outside, from a system with no limit — and
+     * automated VPS sales without an abuse ceiling is how a stolen card funds
+     * a botnet. Existing servers stay viewable and manageable either way; only
+     * buying more stops.
+     *
+     * The specification suggests 3 for a new customer. It is not defaulted
+     * here: a number invented in code is a business decision nobody made.
+     */
+    case AntiAbuseMaxActiveServers = 'anti_abuse.max_active_servers';
+
+    /**
+     * How many orders one customer may create inside the window below.
+     *
+     * Counted from persisted orders, not from button presses: a customer whose
+     * order failed and who tries again has made two orders, and a rate limit
+     * that counted Telegram taps could be evaded by a client that retries.
+     *
+     * Absent or malformed blocks new purchases, for the same reason as above.
+     */
+    case AntiAbusePurchaseLimitCount = 'anti_abuse.purchase_limit_count';
+
+    /**
+     * How far back the purchase count above looks, in minutes.
+     *
+     * Absent or malformed blocks new purchases. A window invented here would
+     * silently decide how fast someone can buy.
+     */
+    case AntiAbusePurchaseWindowMinutes = 'anti_abuse.purchase_window_minutes';
+
     public function type(): SettingType
     {
         return match ($this) {
             self::SalesEnabled, self::ProvisioningEnabled => SettingType::Boolean,
-            self::FxMaxAgeMinutes, self::ProvisioningStuckAfterMinutes => SettingType::Integer,
+            self::FxMaxAgeMinutes,
+            self::ProvisioningStuckAfterMinutes,
+            self::AntiAbuseMaxActiveServers,
+            self::AntiAbusePurchaseLimitCount,
+            self::AntiAbusePurchaseWindowMinutes => SettingType::Integer,
             self::AupCurrentVersion => SettingType::String,
         };
     }

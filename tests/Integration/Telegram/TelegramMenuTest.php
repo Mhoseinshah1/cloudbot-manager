@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 use App\Enums\UserStatus;
 use App\Telegram\Enums\TelegramAction;
+use App\Telegram\Flows\BuyMessages;
+use App\Telegram\Flows\ServerMessages;
 use App\Telegram\MainMenu;
 use App\Telegram\TelegramUpdateNormalizer;
 
@@ -154,9 +156,17 @@ it('refuses an update with no id at all', function (): void {
 
 it('says nothing about phases to a customer', function (): void {
     $customerFacing = [
-        MainMenu::GREETING, MainMenu::PROMPT, MainMenu::NOT_READY,
+        MainMenu::GREETING, MainMenu::PROMPT,
         MainMenu::STATE_EXPIRED, MainMenu::UNKNOWN, MainMenu::CALLBACK_EXPIRED,
         MainMenu::HELP, MainMenu::RESTRICTED,
+        // The sales and management phases added most of what a customer now
+        // reads, so those messages are held to the same rule.
+        BuyMessages::EXPIRED, BuyMessages::RESTRICTED, BuyMessages::CANCELLED,
+        BuyMessages::OFFER_CHANGED, BuyMessages::NOTHING_FOR_SALE,
+        BuyMessages::TERMS_MISSING, BuyMessages::OPTION_GONE,
+        ServerMessages::NONE, ServerMessages::NOT_FOUND,
+        ServerMessages::DELETE_REQUESTED, ServerMessages::DELETE_EXPIRED,
+        ServerMessages::NO_PASSWORD,
     ];
 
     foreach ($customerFacing as $message) {
@@ -166,13 +176,21 @@ it('says nothing about phases to a customer', function (): void {
     }
 });
 
-it('knows which entries actually do something yet', function (): void {
-    expect(TelegramAction::Start->isImplemented())->toBeTrue()
-        ->and(TelegramAction::MenuHelp->isImplemented())->toBeTrue()
-        ->and(TelegramAction::MenuProfile->isImplemented())->toBeTrue()
-        // The commerce entries arrive with the sales phase.
-        ->and(TelegramAction::MenuBuyServer->isImplemented())->toBeFalse()
-        ->and(TelegramAction::MenuWallet->isImplemented())->toBeFalse();
+it('has a flow behind every entry it shows', function (): void {
+    // The menu showed all six from the first phase, four of them answering
+    // that they were not ready. They all work now, and nothing may quietly
+    // regress to a polite refusal: the processor's routing is checked against
+    // the enum rather than against a list written out here.
+    $routed = file_get_contents(base_path('app/Telegram/TelegramUpdateProcessor.php'));
+
+    foreach (TelegramAction::menuEntries() as $entry) {
+        expect($routed)->toContain('TelegramAction::'.$entry->name);
+    }
+
+    // And the sentence for an entry with no flow is gone entirely, rather than
+    // surviving as something a regression could reach.
+    expect(method_exists(MainMenu::class, 'notReadyFor'))->toBeFalse()
+        ->and(defined(MainMenu::class.'::NOT_READY'))->toBeFalse();
 });
 
 it('shows a customer their own identity and nothing else', function (): void {

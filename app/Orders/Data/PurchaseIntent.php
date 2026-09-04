@@ -35,6 +35,14 @@ final readonly class PurchaseIntent
         public string $idempotencyKey,
         /** Chosen operating system image, or null to take the location's default. */
         public ?int $providerImageId = null,
+        /**
+         * The offer the customer was shown, when they were shown one.
+         *
+         * Null for a caller that never previewed anything — a test, an
+         * operator tool — and set by any flow that put a price in front of a
+         * person. It can only refuse a sale, never set its price.
+         */
+        public ?ApprovedQuote $approved = null,
     ) {}
 
     /**

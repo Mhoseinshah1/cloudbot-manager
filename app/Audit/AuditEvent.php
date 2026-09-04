@@ -93,4 +93,24 @@ final class AuditEvent
     public const InventoryRemoteMissing = 'inventory.remote_missing';
 
     public const InventoryDriftCorrected = 'inventory.drift_corrected';
+
+    /*
+     * Server management. What a customer asked for, and what happened.
+     *
+     * The request and the outcome are separate events for the destructive one:
+     * a delete that was asked for and never reached the provider is the first
+     * thing anybody looks for when a machine is still running.
+     */
+
+    public const ServerPowerOn = 'server.power_on';
+
+    public const ServerPowerOff = 'server.power_off';
+
+    public const ServerReboot = 'server.reboot';
+
+    public const ServerDeleteRequested = 'server.delete_requested';
+
+    public const ServerTerminated = 'server.terminated';
+
+    public const ServerPasswordRevealed = 'server.password_revealed';
 }

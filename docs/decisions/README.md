@@ -20,3 +20,6 @@ One file per decision, `ADR-NNN-short-title.md`, each recording:
 
 - [ADR-001](ADR-001-fixed-thirty-day-monthly-period.md) — a monthly service
   period is exactly 30 × 24 hours (2,592,000 seconds), not a calendar month.
+- [ADR-002](ADR-002-purchase-capacity-counting.md) — a customer's active-server
+  limit counts every order that could still become a server, not only the
+  servers they already hold.

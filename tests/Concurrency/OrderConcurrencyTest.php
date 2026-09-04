@@ -17,6 +17,7 @@ use App\Orders\Data\PurchaseIntent;
 use App\Orders\OrderService;
 use App\Orders\OrderStateMachine;
 use App\Orders\RefundService;
+use App\Outbox\OutboxTopic;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
 use Tests\Support\Concurrency\ForkedWorkers;
@@ -147,7 +148,9 @@ it('refunds once when the same failure is confirmed concurrently', function (): 
     expect($fresh->status)->toBe(OrderStatus::Refunded)
         ->and(WalletTransaction::query()->where('idempotency_key', $fresh->refundIdempotencyKey())->count())
         ->toBe(1)
-        ->and(OutboxMessage::query()->count())->toBe(1)
+        // Scoped to the refund topic: a paid order also promises to be
+        // provisioned, and what this proves is one refund promise.
+        ->and(OutboxMessage::query()->where('topic', OutboxTopic::OrderRefunded)->count())->toBe(1)
         ->and(User::query()->findOrFail($customerId)->wallet_balance_toman)
         ->toBe($charged + 1_500_000);
 
@@ -226,10 +229,10 @@ it('parks an uncertain outcome once when it is reported concurrently', function 
 
     expect($fresh->status)->toBe(OrderStatus::NeedsAttention)
         ->and($fresh->failure_category)->toBe(OrderFailureCategory::UncertainResult)
-        // No refund, no outbox message, no money moved: a human decides next.
+        // No refund promised, no money moved: a human decides next.
         ->and(WalletTransaction::query()->where('idempotency_key', $fresh->refundIdempotencyKey())->count())
         ->toBe(0)
-        ->and(OutboxMessage::query()->count())->toBe(0)
+        ->and(OutboxMessage::query()->where('topic', OutboxTopic::OrderRefunded)->count())->toBe(0)
         ->and(User::query()->findOrFail($customerId)->wallet_balance_toman)->toBe($charged)
         // Recorded exactly once, however many workers reported it.
         ->and(AuditLog::query()->where('event', AuditEvent::OrderNeedsAttention)->count())->toBe(1);

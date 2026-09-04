@@ -41,6 +41,13 @@ final class ProvisioningFloor
 {
     public const AUP_VERSION = '2026-01';
 
+    /** Comfortably above anything a test buys, unless the test is about limits. */
+    public const MAX_ACTIVE_SERVERS = 50;
+
+    public const PURCHASE_LIMIT = 100;
+
+    public const PURCHASE_WINDOW_MINUTES = 60;
+
     public User $owner;
 
     public User $customer;
@@ -83,6 +90,14 @@ final class ProvisioningFloor
         $settings->set(SettingKey::AupCurrentVersion, self::AUP_VERSION, $self->owner);
         $settings->set(SettingKey::ProvisioningEnabled, true, $self->owner);
         $settings->set(SettingKey::ProvisioningStuckAfterMinutes, 10, $self->owner);
+
+        // The abuse ceilings. Configured explicitly because the order boundary
+        // fails closed without them, which is the point: a shop that sells with
+        // no limit because nobody set one behaves exactly like a shop with no
+        // limit. Generous enough that only the tests about limits hit them.
+        $settings->set(SettingKey::AntiAbuseMaxActiveServers, self::MAX_ACTIVE_SERVERS, $self->owner);
+        $settings->set(SettingKey::AntiAbusePurchaseLimitCount, self::PURCHASE_LIMIT, $self->owner);
+        $settings->set(SettingKey::AntiAbusePurchaseWindowMinutes, self::PURCHASE_WINDOW_MINUTES, $self->owner);
 
         app(ExchangeRateService::class)->recordManualRate('EUR', '92345.12345678', $self->owner);
 

@@ -5,15 +5,14 @@ declare(strict_types=1);
 namespace App\Telegram;
 
 use App\Enums\UserStatus;
-use App\Telegram\Enums\TelegramAction;
 
 /**
  * What the customer sees.
  *
- * Persian-first, because the customers are. The six Release 1.0 entries are all
- * shown from the start, so the shape of the product is honest rather than
- * growing buttons phase by phase — but only the ones that work do anything, and
- * the rest say plainly that they are not ready yet.
+ * Persian-first, because the customers are. The six Release 1.0 entries were
+ * all shown from the first phase, so the shape of the product was honest rather
+ * than growing buttons one at a time; four of them answered that they were not
+ * ready yet. All six work now, and that answer is gone with them.
  *
  * Nothing here says "Phase 9". A customer is owed a sentence in their own
  * language, not this project's internal schedule.
@@ -28,9 +27,6 @@ final class MainMenu
     public const GREETING = 'به ربات فروش سرور خوش آمدید 👋';
 
     public const PROMPT = 'برای شروع، یکی از گزینه‌های زیر را انتخاب کنید:';
-
-    /** Shown for an entry whose flow has not been built yet. */
-    public const NOT_READY = 'این بخش هنوز فعال نشده است. به‌زودی در دسترس قرار می‌گیرد 🙏';
 
     /** Shown when a conversation was forgotten before it finished. */
     public const STATE_EXPIRED = 'زمان این گفتگو به پایان رسید. لطفاً دوباره از منوی اصلی شروع کنید.';
@@ -97,11 +93,5 @@ final class MainMenu
             : self::RESTRICTED;
 
         return "پروفایل شما\n\nشناسه کاربری: {$telegramUserId}\n{$line}";
-    }
-
-    /** What to say for a recognised entry that has no flow behind it yet. */
-    public static function notReadyFor(TelegramAction $action): string
-    {
-        return self::NOT_READY;
     }
 }

@@ -97,4 +97,62 @@ return [
         'reconcile_batch' => 100,
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Server Actions
+    |--------------------------------------------------------------------------
+    |
+    | Power, reboot and delete. The attempt cap is the reason this section
+    | exists: a destructive request that retried forever would keep asking a
+    | provider to delete a machine it may already have deleted, and "keep
+    | trying" is not a safe default for anything irreversible. An action that
+    | runs out of attempts becomes somebody's decision rather than a loop.
+    |
+    */
+
+    'server_actions' => [
+        'max_attempts' => 3,
+        'lock_ttl_seconds' => (int) env('SERVER_ACTION_LOCK_TTL_SECONDS', 300),
+
+        // How long an action may sit unsettled before the reconciler asks the
+        // provider what happened to it.
+        'reconcile_after_seconds' => 60,
+        'reconcile_batch' => 100,
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Root Password Reveal
+    |--------------------------------------------------------------------------
+    |
+    | How long a revealed password stays on screen before the bot tries to
+    | delete the message. Best effort only, and the security of the system
+    | never depends on it succeeding: Telegram may refuse, the customer may
+    | have forwarded it, and the message may already be on somebody's laptop.
+    | It is a courtesy that shortens the window, not a control.
+    |
+    */
+
+    'server_credentials' => [
+        'reveal_visible_seconds' => (int) env('ROOT_PASSWORD_VISIBLE_SECONDS', 60),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Outbox Delivery
+    |--------------------------------------------------------------------------
+    |
+    | How many undelivered intents one sweep may pick up, and how many times
+    | one may be attempted before it stops being retried automatically. Both
+    | bounded: an unbounded query would pull a backlog into memory, and an
+    | unbounded retry would hammer Telegram with a message it will never
+    | accept.
+    |
+    */
+
+    'outbox' => [
+        'dispatch_batch' => 100,
+        'max_attempts' => 5,
+    ],
+
 ];

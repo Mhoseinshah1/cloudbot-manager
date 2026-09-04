@@ -7,10 +7,12 @@ namespace App\Jobs;
 use App\Models\TelegramAccount;
 use App\Models\TelegramUpdate;
 use App\Support\Queues;
+use App\Telegram\Data\CallbackParameters;
 use App\Telegram\Data\NormalizedUpdate;
 use App\Telegram\Exceptions\TelegramApiException;
 use App\Telegram\Exceptions\TelegramForbidden;
 use App\Telegram\Exceptions\TelegramRateLimited;
+use App\Telegram\Flows\FlowLock;
 use App\Telegram\TelegramAccountService;
 use App\Telegram\TelegramUpdateProcessor;
 use App\Telegram\TelegramUpdateRecorder;
@@ -80,6 +82,7 @@ final class ProcessTelegramUpdateJob implements ShouldQueue
         TelegramUpdateProcessor $processor,
         TelegramAccountService $accounts,
         CacheFactory $cache,
+        FlowLock $flows,
     ): void {
         // Nothing is read before the lock, deliberately. The lock key is built
         // from the payload alone, and a row read beforehand describes the world
@@ -133,7 +136,31 @@ final class ProcessTelegramUpdateJob implements ShouldQueue
                 return;
             }
 
-            $this->run($update, $recorder, $processor, $accounts);
+            // The other race: two different updates from one customer at once.
+            // The update lock does not cover it — the ids differ — and both
+            // would read the same conversation state and both act on it. Taken
+            // here rather than inside the processor so that a worker which
+            // cannot have it hands the update back untouched.
+            $conversation = $this->conversationLock($update, $flows);
+
+            if ($conversation === false) {
+                $this->release(2);
+
+                return;
+            }
+
+            try {
+                $this->run($update, $recorder, $processor, $accounts);
+            } finally {
+                if ($conversation instanceof Lock) {
+                    try {
+                        $conversation->release();
+                    } catch (Throwable) {
+                        // The TTL is the backstop, and a failed release must
+                        // not mask what the handling did.
+                    }
+                }
+            }
         } finally {
             try {
                 $lock->release();
@@ -166,6 +193,23 @@ final class ProcessTelegramUpdateJob implements ShouldQueue
         return $store instanceof LockProvider
             ? $store->lock($this->lockKey(), 30)
             : null;
+    }
+
+    /**
+     * This customer's conversation lock, if they have an identity at all.
+     *
+     * Returns null when there is nothing to coordinate — a channel post has no
+     * customer — and false when somebody else holds the conversation, which is
+     * the caller's signal to hand the update back rather than read state that
+     * is about to be rewritten.
+     */
+    private function conversationLock(TelegramUpdate $update, FlowLock $flows): Lock|false|null
+    {
+        if ($update->telegram_user_id === null) {
+            return null;
+        }
+
+        return $flows->acquire($update->telegram_user_id) ?? false;
     }
 
     private function run(
@@ -236,6 +280,9 @@ final class ProcessTelegramUpdateJob implements ShouldQueue
                 'last_name' => self::stringOrNull($metadata['last_name'] ?? null),
             ],
             isBot: ($metadata['is_bot'] ?? false) === true,
+            // The button's hints, restored from the row rather than re-parsed:
+            // the string they came from was never kept, which is the point.
+            parameters: CallbackParameters::fromMetadata($metadata),
         );
     }
 

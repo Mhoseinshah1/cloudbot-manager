@@ -17,6 +17,8 @@ use App\Models\User;
 use App\Orders\Data\PurchaseIntent;
 use App\Orders\Exceptions\OrderIdempotencyConflict;
 use App\Orders\Exceptions\OrderNotPlaceable;
+use App\Outbox\OutboxTopic;
+use App\Outbox\OutboxWriter;
 use App\Pricing\Data\PriceQuote;
 use App\Pricing\PricingService;
 use App\Settings\SettingsService;
@@ -53,6 +55,8 @@ final readonly class OrderService
         private InvoiceService $invoices,
         private OrderStateMachine $states,
         private AuditRecorder $audit,
+        private PurchasePolicyService $policy,
+        private OutboxWriter $outbox,
     ) {}
 
     /**
@@ -85,8 +89,30 @@ final readonly class OrderService
         $image = $this->requireSelectableImage($intent, $quote);
         $selectionMode = $intent->imageSelectionMode();
 
+        // What the customer approved, against what it costs now. Only on this
+        // path: a retry carrying an existing key returned above without ever
+        // asking for a price, which is what stops "did my purchase work?" from
+        // being answered by today's rate.
+        $this->assertOfferUnchanged($intent, $quote, $image, $selectionMode, $aupVersion);
+
         try {
             return DB::transaction(function () use ($intent, $quote, $image, $selectionMode, $aupVersion): Order {
+                // The customer's row, locked before the abuse limits are
+                // counted and held until this order exists. Two purchases
+                // racing for the last permitted slot queue here; counted
+                // without the lock, both would see room and both would pass.
+                //
+                // User first, matching the order WalletService takes, so a
+                // purchase and a concurrent wallet movement queue rather than
+                // deadlock.
+                $customer = User::query()->whereKey($intent->user->getKey())->lockForUpdate()->first();
+
+                if (! $customer instanceof User) {
+                    throw new ModelNotFoundException('The customer no longer exists.');
+                }
+
+                $this->policy->assertMayPurchase($customer);
+
                 $order = Order::query()->create([
                     'user_id' => $intent->user->getKey(),
                     'product_id' => $quote->productId,
@@ -234,6 +260,30 @@ final readonly class OrderService
 
             $invoice = $this->invoices->issueForOrder($paid);
 
+            // The promise to build it, written with the money that paid for it.
+            //
+            // Dispatching a job after this transaction commits would be the
+            // obvious thing and is not enough: a worker that dies between the
+            // commit and the dispatch leaves an order at paid with no
+            // provisioning token, which is a state the stuck-provisioning sweep
+            // cannot see — it looks for provisioning that started and stalled,
+            // and this never started. The row closes that gap, because a sweep
+            // over unprocessed intents finds it whatever crashed.
+            //
+            // Delivery may still duplicate the dispatch; that is safe, because
+            // one durable token yields one remote machine however many jobs
+            // arrive.
+            $this->outbox->record(
+                OutboxTopic::ProvisioningRequested,
+                $paid,
+                [
+                    'order_id' => $paid->getKey(),
+                    'order_number' => $paid->order_number,
+                    'user_id' => $paid->user_id,
+                ],
+                self::provisioningRequestKey($paid),
+            );
+
             $this->audit->record(
                 AuditEvent::OrderPaid,
                 actor: $customer,
@@ -323,6 +373,56 @@ final readonly class OrderService
     public static function newOrderNumber(): string
     {
         return 'ORD-'.strtoupper((string) Str::ulid());
+    }
+
+    /**
+     * One request to build one order, however many times payment is retried.
+     */
+    public static function provisioningRequestKey(Order $order): string
+    {
+        return 'provisioning:order:'.$order->getKey().':requested';
+    }
+
+    /**
+     * Refuse a purchase whose offer moved since the customer approved it.
+     *
+     * The comparison is against the quote just fetched from PricingService, so
+     * the approved figures never become the price — they can only fail to match
+     * one. A customer sending back a figure of their own choosing gets a
+     * refusal, not a discount.
+     *
+     * Nothing is created and no money moves: the flow shows the new offer and
+     * asks again.
+     *
+     * @throws OrderNotPlaceable
+     */
+    private function assertOfferUnchanged(
+        PurchaseIntent $intent,
+        PriceQuote $quote,
+        ProviderImage $image,
+        ImageSelectionMode $selectionMode,
+        string $aupVersion,
+    ): void {
+        $approved = $intent->approved;
+
+        if ($approved === null) {
+            return;
+        }
+
+        // The intention, and separately the image this order would actually be
+        // built from. Both matter: asking for the default stays a different
+        // request from naming an image, and a default that has been repointed
+        // since the customer read the screen is a change they should see.
+        $imageId = $selectionMode === ImageSelectionMode::Explicit ? (int) $image->getKey() : null;
+
+        if ($approved->stillMatches($quote, $aupVersion, $selectionMode, $imageId, (int) $image->getKey())) {
+            return;
+        }
+
+        throw OrderNotPlaceable::because(
+            OrderRefusalReason::QuoteChanged,
+            'The offer changed after the customer approved it.',
+        );
     }
 
     /**

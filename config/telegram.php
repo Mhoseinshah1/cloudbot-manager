@@ -87,4 +87,21 @@ return [
         'ttl_seconds' => (int) env('TELEGRAM_STATE_TTL_SECONDS', 1800),
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Operational Alert Destination
+    |--------------------------------------------------------------------------
+    |
+    | Where alerts about failed provisioning, orders needing attention and
+    | inventory drift are sent. A numeric Telegram chat or channel id.
+    |
+    | No default, and deliberately not a guess. An installation that has not
+    | been told where its alerts go records them as undeliverable, which is a
+    | visible problem — whereas a plausible-looking default would send an
+    | operator's incidents to a chat nobody is reading.
+    |
+    */
+
+    'admin_chat_id' => env('TELEGRAM_ADMIN_CHAT_ID'),
+
 ];

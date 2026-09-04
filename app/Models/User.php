@@ -129,6 +129,45 @@ class User extends Authenticatable implements FilamentUser
         return $this->hasMany(Order::class);
     }
 
+    /**
+     * The servers this customer owns.
+     *
+     * The relation exists so that every customer-facing lookup can start from
+     * the customer — `$user->servers()->whereKey($id)` cannot return somebody
+     * else's machine, whereas a global find with an ownership check afterwards
+     * is the same thing only until someone forgets the check.
+     *
+     * @return HasMany<Server, $this>
+     */
+    public function servers(): HasMany
+    {
+        return $this->hasMany(Server::class);
+    }
+
+    /**
+     * @return HasMany<Invoice, $this>
+     */
+    public function invoices(): HasMany
+    {
+        return $this->hasMany(Invoice::class);
+    }
+
+    /**
+     * @return HasMany<WalletTransaction, $this>
+     */
+    public function walletTransactions(): HasMany
+    {
+        return $this->hasMany(WalletTransaction::class);
+    }
+
+    /**
+     * @return HasMany<Subscription, $this>
+     */
+    public function subscriptions(): HasMany
+    {
+        return $this->hasMany(Subscription::class);
+    }
+
     public function isActive(): bool
     {
         return $this->status->canAuthenticate();

@@ -32,6 +32,14 @@ final readonly class NormalizedUpdate
         public TelegramAction $action,
         public array $profile = [],
         public bool $isBot = false,
+        /**
+         * The safe hints a pressed button carried.
+         *
+         * Parsed out of a closed grammar and bounded. Never authority: an id
+         * here says what the customer asked about, and whether they may have it
+         * is decided by a query scoped to them.
+         */
+        public CallbackParameters $parameters = new CallbackParameters,
     ) {}
 
     /** Whether this update can be attributed to a customer at all. */
@@ -56,6 +64,9 @@ final readonly class NormalizedUpdate
         return [
             'is_bot' => $this->isBot,
             ...$this->profile,
+            // Flattened scalars, so the row keeps what the button meant without
+            // ever keeping the opaque string a customer sent.
+            ...$this->parameters->toMetadata(),
         ];
     }
 }

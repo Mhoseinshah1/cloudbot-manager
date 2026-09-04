@@ -61,4 +61,20 @@ final class FinancialRecordDeletionForbidden extends RuntimeException
     {
         return new self('subscription', 'Subscriptions are retained service history and cannot be deleted.');
     }
+
+    public static function forServerAction(): self
+    {
+        return new self(
+            'server_action',
+            'Server actions are retained operational history and cannot be deleted.',
+        );
+    }
+
+    public static function forNotificationLog(): self
+    {
+        return new self(
+            'notification_log',
+            'Notification history is retained for support and cannot be deleted.',
+        );
+    }
 }

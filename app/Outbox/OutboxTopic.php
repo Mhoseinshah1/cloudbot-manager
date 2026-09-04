@@ -16,8 +16,26 @@ final class OutboxTopic
     /** A customer's order failed and their money went back to their wallet. */
     public const OrderRefunded = 'order.refunded';
 
+    /**
+     * A customer paid, and a server is owed.
+     *
+     * Written inside the transaction that takes the money, because the moment
+     * between "paid" and "provisioning job dispatched" is otherwise a hole
+     * nothing can see into: an order sitting at paid with no provisioning
+     * token is invisible to the stuck-provisioning sweep, which looks for
+     * orders that started and stalled. A worker that dies in that gap leaves a
+     * customer charged for a machine nobody will ever build.
+     */
+    public const ProvisioningRequested = 'provisioning.requested';
+
     /** A customer's server exists and is theirs. */
     public const ProvisioningSucceeded = 'provisioning.succeeded';
+
+    /** Somebody asked for something to be done to a server. */
+    public const ServerActionRequested = 'server.action_requested';
+
+    /** A customer's server has been deleted and their service has ended. */
+    public const ServerTerminated = 'server.terminated';
 
     /** An order stopped somewhere a person has to resolve. */
     public const ProvisioningNeedsAttention = 'provisioning.needs_attention';

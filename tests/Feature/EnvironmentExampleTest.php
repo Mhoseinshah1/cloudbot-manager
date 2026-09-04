@@ -17,7 +17,8 @@ it('documents every variable this phase implements', function (string $variable)
     'CACHE_STORE', 'SESSION_DRIVER', 'QUEUE_CONNECTION',
     'PROVIDER_OPERATION_TIMEOUT_SECONDS', 'PROVISIONING_LOCK_TTL_SECONDS',
     'TELEGRAM_BOT_TOKEN', 'TELEGRAM_WEBHOOK_SECRET', 'TELEGRAM_API_BASE_URL',
-    'TELEGRAM_WEBHOOK_URL', 'TELEGRAM_STATE_TTL_SECONDS',
+    'TELEGRAM_WEBHOOK_URL', 'TELEGRAM_STATE_TTL_SECONDS', 'TELEGRAM_ADMIN_CHAT_ID',
+    'ROOT_PASSWORD_VISIBLE_SECONDS', 'SERVER_ACTION_LOCK_TTL_SECONDS',
 ]);
 
 it('ships no variable for a phase that has not been built', function (string $variable): void {

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Telegram;
 
 use App\Support\Secrets\SecretScrubber;
+use App\Telegram\Callbacks\CallbackGrammar;
 use App\Telegram\Data\NormalizedUpdate;
 use App\Telegram\Enums\TelegramAction;
 use App\Telegram\Enums\TelegramChatType;
@@ -24,12 +25,16 @@ use App\Telegram\Enums\TelegramUpdateType;
  * for becomes `Unknown`, and its content is discarded rather than kept in case
  * it is useful later — text kept "in case" is exactly what ends up rendered on
  * an operator's screen.
+ *
+ * Callback data now carries parameters — which server, which page — and is
+ * parsed by {@see CallbackGrammar} rather than matched whole. That does not
+ * relax the rule: the grammar is closed, every field is bounded, and what
+ * survives is a handful of scalars this system parsed rather than the string a
+ * customer sent. None of it is authority. An id says what somebody asked
+ * about, and whether they may have it is decided by a query scoped to them.
  */
 final readonly class TelegramUpdateNormalizer
 {
-    /** Telegram's own limit on callback data, and therefore ours. */
-    private const MAX_CALLBACK_DATA = 64;
-
     /** Comfortably inside the column, and far inside anything Telegram sends. */
     private const MAX_PROFILE_FIELD = 120;
 
@@ -42,17 +47,6 @@ final readonly class TelegramUpdateNormalizer
         'پروفایل' => TelegramAction::MenuProfile,
         'راهنما' => TelegramAction::MenuHelp,
         'منوی اصلی' => TelegramAction::MainMenu,
-    ];
-
-    /** Callback payloads this phase understands, namespaced and closed. */
-    private const CALLBACK_ACTIONS = [
-        'menu:main' => TelegramAction::MainMenu,
-        'menu:buy_server' => TelegramAction::MenuBuyServer,
-        'menu:my_servers' => TelegramAction::MenuMyServers,
-        'menu:wallet' => TelegramAction::MenuWallet,
-        'menu:invoices' => TelegramAction::MenuInvoices,
-        'menu:profile' => TelegramAction::MenuProfile,
-        'menu:help' => TelegramAction::MenuHelp,
     ];
 
     /**
@@ -125,6 +119,10 @@ final readonly class TelegramUpdateNormalizer
         $message = $this->arrayAt($callback, 'message') ?? [];
         $chat = $this->arrayAt($message, 'chat') ?? [];
 
+        // Parsed, not stored. What survives is the action and a handful of
+        // bounded scalars; the opaque string the customer sent does not.
+        $parsed = CallbackGrammar::parse($this->stringAt($callback, 'data'));
+
         return new NormalizedUpdate(
             updateId: $updateId,
             type: TelegramUpdateType::CallbackQuery,
@@ -135,9 +133,10 @@ final readonly class TelegramUpdateNormalizer
             // Telegram's handle for the pressed button. Bounded, and kept only
             // long enough to stop the spinner.
             callbackQueryId: $this->bounded($this->stringAt($callback, 'id'), 64),
-            action: $this->actionFromCallbackData($this->stringAt($callback, 'data')),
+            action: $parsed['action'],
             profile: $this->profile($from),
             isBot: ($from['is_bot'] ?? false) === true,
+            parameters: $parsed['parameters'],
         );
     }
 
@@ -173,23 +172,6 @@ final readonly class TelegramUpdateNormalizer
         }
 
         return self::MENU_LABELS[$trimmed] ?? TelegramAction::Unknown;
-    }
-
-    /**
-     * What a pressed button asked for.
-     *
-     * Callback data is untrusted input that happens to have been round-tripped
-     * through Telegram, so it is length-bounded and matched against a closed
-     * list rather than parsed. Nothing about ownership, price or authority is
-     * ever read out of it.
-     */
-    private function actionFromCallbackData(?string $data): TelegramAction
-    {
-        if ($data === null || mb_strlen($data) > self::MAX_CALLBACK_DATA) {
-            return TelegramAction::Unknown;
-        }
-
-        return self::CALLBACK_ACTIONS[trim($data)] ?? TelegramAction::Unknown;
     }
 
     /**

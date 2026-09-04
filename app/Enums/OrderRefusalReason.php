@@ -39,6 +39,15 @@ enum OrderRefusalReason: string
     case NotTheOwner = 'not_the_owner';
 
     /**
+     * The offer moved between the customer seeing it and confirming it.
+     *
+     * Nothing was created and nothing was charged. The customer is shown the
+     * new offer and asked again, because agreeing to one price is not agreeing
+     * to whatever replaced it.
+     */
+    case QuoteChanged = 'quote_changed';
+
+    /**
      * @return list<string>
      */
     public static function values(): array

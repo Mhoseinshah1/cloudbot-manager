@@ -25,6 +25,18 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
 use Tests\Support\Orders\SalesFloor;
 
+/**
+ * How many refunds this system has promised to tell somebody about.
+ *
+ * Scoped to the topic rather than counting the whole table. A paid order also
+ * writes a provisioning intent, and these assertions have always meant "no
+ * refund was promised" rather than "the outbox is empty".
+ */
+function refundIntents(): int
+{
+    return OutboxMessage::query()->where('topic', OutboxTopic::OrderRefunded)->count();
+}
+
 beforeEach(function (): void {
     app(RoleProvisioner::class)->sync();
 
@@ -119,7 +131,7 @@ it('refuses to refund an order that was never charged', function (): void {
     expect($this->floor->customer->fresh()->wallet_balance_toman)->toBe($before)
         ->and(WalletTransaction::query()->where('idempotency_key', $order->refundIdempotencyKey())->count())
         ->toBe(0)
-        ->and(OutboxMessage::query()->count())->toBe(0);
+        ->and(refundIntents())->toBe(0);
 });
 
 it('will not justify one order\'s refund with another order\'s charge', function (): void {
@@ -190,7 +202,7 @@ it('parks an uncertain outcome for attention rather than failing it', function (
         ->and($this->floor->customer->fresh()->wallet_balance_toman)->toBe($balance)
         ->and(WalletTransaction::query()->where('idempotency_key', $order->refundIdempotencyKey())->count())
         ->toBe(0)
-        ->and(OutboxMessage::query()->count())->toBe(0)
+        ->and(refundIntents())->toBe(0)
         ->and(AuditLog::query()->where('event', AuditEvent::OrderRefunded)->count())->toBe(0);
 });
 
@@ -278,7 +290,7 @@ it('records a confirmed failure for an order nobody was charged for', function (
         ->and($this->floor->customer->fresh()->wallet_balance_toman)->toBe($balance)
         ->and(WalletTransaction::query()->where('idempotency_key', $order->refundIdempotencyKey())->count())
         ->toBe(0)
-        ->and(OutboxMessage::query()->count())->toBe(0);
+        ->and(refundIntents())->toBe(0);
 });
 
 it('leaves an order needing attention exactly where it is', function (): void {
@@ -289,7 +301,7 @@ it('leaves an order needing attention exactly where it is', function (): void {
 
     expect($order->fresh()->status)->toBe(OrderStatus::NeedsAttention)
         ->and($this->floor->customer->fresh()->wallet_balance_toman)->toBe($balance)
-        ->and(OutboxMessage::query()->count())->toBe(0)
+        ->and(refundIntents())->toBe(0)
         ->and(AuditLog::query()->where('event', AuditEvent::OrderRefunded)->count())->toBe(0);
 });
 
@@ -304,7 +316,7 @@ it('refunds once when the decision is reached twice', function (): void {
         ->and($second->status)->toBe(OrderStatus::Refunded)
         ->and($this->floor->customer->fresh()->wallet_balance_toman)->toBe($charged + $order->total_toman)
         ->and(WalletTransaction::query()->where('idempotency_key', $order->refundIdempotencyKey())->count())->toBe(1)
-        ->and(OutboxMessage::query()->count())->toBe(1)
+        ->and(refundIntents())->toBe(1)
         ->and(AuditLog::query()->where('event', AuditEvent::OrderRefunded)->count())->toBe(1);
 });
 
@@ -365,7 +377,7 @@ it('writes one refund notification intent with safe facts only', function (): vo
     $order = paidOrder();
     $refunded = $this->refunds->refundConfirmedFailure($order, ConfirmedNoServerOutcome::AvailabilityLostNoServer);
 
-    $message = OutboxMessage::query()->sole();
+    $message = OutboxMessage::query()->where('topic', OutboxTopic::OrderRefunded)->sole();
 
     expect($message->topic)->toBe(OutboxTopic::OrderRefunded)
         ->and($message->aggregate_type)->toBe((new Order)->getMorphClass())
@@ -398,7 +410,7 @@ it('rolls the refund, the order and the outbox back together', function (): void
 
     expect($order->fresh()->status)->toBe(OrderStatus::Paid)
         ->and($this->floor->customer->fresh()->wallet_balance_toman)->toBe($balance)
-        ->and(OutboxMessage::query()->count())->toBe(0)
+        ->and(refundIntents())->toBe(0)
         ->and(WalletTransaction::query()->where('idempotency_key', $order->refundIdempotencyKey())->count())
         ->toBe(0);
 });
