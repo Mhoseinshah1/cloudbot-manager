@@ -15,4 +15,16 @@ final class OutboxTopic
 {
     /** A customer's order failed and their money went back to their wallet. */
     public const OrderRefunded = 'order.refunded';
+
+    /** A customer's server exists and is theirs. */
+    public const ProvisioningSucceeded = 'provisioning.succeeded';
+
+    /** An order stopped somewhere a person has to resolve. */
+    public const ProvisioningNeedsAttention = 'provisioning.needs_attention';
+
+    /** A provider refused, or refused us, in a way an operator must know about. */
+    public const ProvisioningFailed = 'provisioning.failed';
+
+    /** Local records and a provider's inventory disagree. */
+    public const InventoryDiscrepancy = 'inventory.discrepancy';
 }

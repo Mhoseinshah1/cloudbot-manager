@@ -60,4 +60,37 @@ final class AuditEvent
     public const OrderExpired = 'order.expired';
 
     public const OrderCancelled = 'order.cancelled';
+
+    /*
+     * Provisioning.
+     *
+     * The order events say what happened to the purchase; the provisioning
+     * events say what happened at the provider. They are separate because one
+     * order can produce several attempts, and an investigation needs to read
+     * them as a sequence rather than as one overwritten fact.
+     */
+
+    public const OrderProvisioningStarted = 'order.provisioning_started';
+
+    public const ProvisioningAttemptStarted = 'provisioning.attempt_started';
+
+    public const ProvisioningAttemptFailed = 'provisioning.attempt_failed';
+
+    public const ProvisioningReconciled = 'provisioning.reconciled';
+
+    public const OrderProvisioned = 'order.provisioned';
+
+    public const ServerCreated = 'server.created';
+
+    public const SubscriptionCreated = 'subscription.created';
+
+    /*
+     * Inventory drift. What the provider holds, against what we sold.
+     */
+
+    public const InventoryOrphanDetected = 'inventory.orphan_detected';
+
+    public const InventoryRemoteMissing = 'inventory.remote_missing';
+
+    public const InventoryDriftCorrected = 'inventory.drift_corrected';
 }

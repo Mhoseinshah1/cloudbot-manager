@@ -145,7 +145,7 @@ it('wires payments to orders without making the link required', function (): voi
     expect($payment->fresh()->order->getKey())->toBe($this->order->getKey());
 });
 
-it('installs both order guards and nothing more', function (): void {
+it('installs the order guards and nothing more', function (): void {
     $triggers = DB::table('pg_trigger as t')
         ->join('pg_class as c', 'c.oid', '=', 't.tgrelid')
         ->where('c.relname', 'orders')
@@ -153,7 +153,11 @@ it('installs both order guards and nothing more', function (): void {
         ->pluck('t.tgname')
         ->sort()->values()->all();
 
-    expect($triggers)->toBe(['orders_no_delete', 'orders_no_snapshot_change']);
+    // Three now: retention, the quoted-snapshot freeze, and Phase 7's
+    // write-once guard on the provisioning token.
+    expect($triggers)->toBe([
+        'orders_no_delete', 'orders_no_provisioning_uuid_change', 'orders_no_snapshot_change',
+    ]);
 });
 
 it('constrains order status at the database level', function (): void {
@@ -189,12 +193,12 @@ it('refuses a non-positive order total', function (): void {
     }
 });
 
-it('ships no table belonging to phase 7 or later', function (): void {
-    // Phase 6 ends at a paid or refunded order. Provisioning, servers and
-    // subscriptions each arrive in their own phase.
+it('ships no table belonging to phase 8 or later', function (): void {
+    // The scope-creep guard, moved forward with the build. Provisioning,
+    // servers and subscriptions arrived with Phase 7; Telegram handling,
+    // customer server actions and Release 1.1 billing have not.
     foreach ([
-        'provisioning_attempts', 'servers', 'server_actions', 'subscriptions',
-        'telegram_updates', 'notification_logs', 'billing_charges',
+        'server_actions', 'telegram_updates', 'notification_logs', 'billing_charges',
     ] as $table) {
         expect(Schema::hasTable($table))->toBeFalse("{$table} belongs to a later phase");
     }

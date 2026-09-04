@@ -18,5 +18,5 @@ One file per decision, `ADR-NNN-short-title.md`, each recording:
 
 ## Current records
 
-None yet. Phase 1 raised no decision that the specification had not already
-made.
+- [ADR-001](ADR-001-fixed-thirty-day-monthly-period.md) — a monthly service
+  period is exactly 30 × 24 hours (2,592,000 seconds), not a calendar month.

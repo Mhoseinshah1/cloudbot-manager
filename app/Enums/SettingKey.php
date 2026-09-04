@@ -44,11 +44,37 @@ enum SettingKey: string
      */
     case AupCurrentVersion = 'aup.current_version';
 
+    /**
+     * Whether paid orders may be sent to a provider to be built.
+     *
+     * A separate switch from sales, and deliberately not the same one. Sales
+     * decides whether new money may be taken; this decides whether money
+     * already taken may be spent at a provider. During an incident an operator
+     * usually wants exactly one of those, and a single switch would force them
+     * to choose between refusing new customers and stranding paid ones.
+     *
+     * Absent or malformed means off: nothing about a missing row says it is
+     * safe to spend money at a third party. Off is a pause, never a failure —
+     * a paid order waits, keeps its token, and resumes when the switch returns.
+     */
+    case ProvisioningEnabled = 'provisioning.enabled';
+
+    /**
+     * How long an order may sit in provisioning before a sweep looks at it,
+     * in minutes.
+     *
+     * Absent or malformed stops automatic sweeping rather than defaulting: any
+     * number invented here would decide, by accident, how long a customer waits
+     * before anyone notices their server never arrived. An operator can still
+     * reconcile a named order by hand.
+     */
+    case ProvisioningStuckAfterMinutes = 'provisioning.stuck_after_minutes';
+
     public function type(): SettingType
     {
         return match ($this) {
-            self::SalesEnabled => SettingType::Boolean,
-            self::FxMaxAgeMinutes => SettingType::Integer,
+            self::SalesEnabled, self::ProvisioningEnabled => SettingType::Boolean,
+            self::FxMaxAgeMinutes, self::ProvisioningStuckAfterMinutes => SettingType::Integer,
             self::AupCurrentVersion => SettingType::String,
         };
     }

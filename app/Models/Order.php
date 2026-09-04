@@ -12,6 +12,7 @@ use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 /**
  * One customer's purchase of one server.
@@ -47,6 +48,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
  * @property-read User $user
  * @property-read Product $product
  * @property-read ProductLocationPrice $productLocationPrice
+ * @property-read Server|null $server
  */
 class Order extends Model
 {
@@ -133,6 +135,24 @@ class Order extends Model
     public function invoices(): HasMany
     {
         return $this->hasMany(Invoice::class);
+    }
+
+    /**
+     * @return HasMany<ProvisioningAttempt, $this>
+     */
+    public function provisioningAttempts(): HasMany
+    {
+        return $this->hasMany(ProvisioningAttempt::class);
+    }
+
+    /**
+     * The one server this order bought, once it exists.
+     *
+     * @return HasOne<Server, $this>
+     */
+    public function server(): HasOne
+    {
+        return $this->hasOne(Server::class);
     }
 
     /**

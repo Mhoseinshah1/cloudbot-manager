@@ -15,6 +15,7 @@ it('documents every variable this phase implements', function (string $variable)
     'REDIS_HOST', 'REDIS_PORT', 'REDIS_PASSWORD',
     'REDIS_CACHE_DB', 'REDIS_QUEUE_DB', 'REDIS_STATE_DB', 'REDIS_LOCK_DB',
     'CACHE_STORE', 'SESSION_DRIVER', 'QUEUE_CONNECTION',
+    'PROVIDER_OPERATION_TIMEOUT_SECONDS', 'PROVISIONING_LOCK_TTL_SECONDS',
 ]);
 
 it('ships no variable for a phase that has not been built', function (string $variable): void {

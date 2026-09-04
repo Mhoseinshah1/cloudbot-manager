@@ -58,4 +58,43 @@ return [
         'timeout_seconds' => (int) env('HEALTH_TIMEOUT_SECONDS', 2),
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Provisioning
+    |--------------------------------------------------------------------------
+    |
+    | Infrastructure, not business policy. How long a provider call may take
+    | and how long a coordination lock is held are properties of the deployment
+    | — a slower network needs a longer timeout — so they belong in config,
+    | where an operator can tune them per environment.
+    |
+    | The controls that decide whether provisioning may happen at all, and how
+    | long an order may sit before a sweep looks at it, are DB settings instead:
+    | those are business decisions, they change during an incident, and they
+    | must not require a redeploy.
+    |
+    | The lock TTL must be at least twice the provider timeout. The lock exists
+    | to stop two workers calling one provider at once, and a lock that can
+    | expire while a call is still in flight does not do that. Nothing here is
+    | the duplicate-prevention mechanism — that is the durable token, the
+    | provider's own idempotency and the unique constraints — but a lock that
+    | lies about what it covers is worse than none.
+    |
+    */
+
+    'provisioning' => [
+        'provider_timeout_seconds' => (int) env('PROVIDER_OPERATION_TIMEOUT_SECONDS', 120),
+        'lock_ttl_seconds' => (int) env('PROVISIONING_LOCK_TTL_SECONDS', 300),
+
+        // The specification's retry policy. Three attempts, backing off, and
+        // never a create retry that has not first reconciled the token.
+        'max_attempts' => 3,
+        'backoff_seconds' => [30, 120, 600],
+
+        // How many stuck orders one sweep may claim. Bounded so the sweeper
+        // cannot pull an unbounded table into memory, and so a backlog is
+        // worked through in steady batches rather than one enormous run.
+        'reconcile_batch' => 100,
+    ],
+
 ];
