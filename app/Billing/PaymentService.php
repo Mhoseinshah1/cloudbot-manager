@@ -7,6 +7,7 @@ namespace App\Billing;
 use App\Audit\AuditEvent;
 use App\Audit\AuditRecorder;
 use App\Billing\Contracts\PaymentGatewayInterface;
+use App\Billing\Exceptions\GatewayMismatch;
 use App\Billing\Exceptions\PaymentIdempotencyConflict;
 use App\Billing\Exceptions\PaymentNotVerifiable;
 use App\Billing\Exceptions\UnauthorizedVerification;
@@ -114,6 +115,12 @@ final readonly class PaymentService
             throw UnauthorizedVerification::forActor();
         }
 
+        // Before the gateway is consulted at all. A future automated gateway
+        // verifies by calling out to a remote API, and a payment it does not
+        // own must not cause that request to be made — let alone have its
+        // answer applied.
+        $this->assertGatewayOwns($payment, $gateway);
+
         $result = $gateway->verify($payment, $evidence);
 
         if (! $result->verified || $result->reference === null) {
@@ -129,6 +136,12 @@ final readonly class PaymentService
             if (! $customer instanceof User || ! $locked instanceof Payment) {
                 throw new ModelNotFoundException('The payment or its owner no longer exists.');
             }
+
+            // Again, on the row the database actually holds. The instance the
+            // caller passed in was read earlier and may no longer describe it;
+            // this is the copy the settlement is about to act on, so this is
+            // the copy that has to match.
+            $this->assertGatewayOwns($locked, $gateway);
 
             if ($locked->status->isSettled()) {
                 // Already accepted, by an earlier call or a concurrent one.
@@ -212,6 +225,20 @@ final readonly class PaymentService
 
             return $locked;
         });
+    }
+
+    /**
+     * Refuse to let one gateway act on another's payment.
+     *
+     * Central rather than left to each implementation: a gateway added later
+     * inherits this protection without having to remember it, and a gateway
+     * that forgot would be exactly the one that could be abused.
+     */
+    private function assertGatewayOwns(Payment $payment, PaymentGatewayInterface $gateway): void
+    {
+        if ($payment->gateway !== $gateway->code()) {
+            throw GatewayMismatch::between($payment->gateway, $gateway->code());
+        }
     }
 
     /**

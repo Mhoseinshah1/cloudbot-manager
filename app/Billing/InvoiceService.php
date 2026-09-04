@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Billing;
 
+use App\Billing\Exceptions\PaymentNotVerifiable;
 use App\Enums\InvoiceStatus;
 use App\Enums\InvoiceType;
 use App\Models\Invoice;
@@ -17,6 +18,10 @@ use Illuminate\Database\QueryException;
  * from the payment's own id rather than from a counter. A counter would need
  * its own locking to be safe, and would still leave a replayed settlement able
  * to draw a second number.
+ *
+ * Only a settled payment may be invoiced. Settlement calls this after marking
+ * the payment paid, but nothing stops another caller reaching it directly, and
+ * an invoice for an unsettled payment would record funding that never happened.
  */
 final class InvoiceService
 {
@@ -28,6 +33,14 @@ final class InvoiceService
      */
     public function issueForPayment(Payment $payment): Invoice
     {
+        if (! $payment->status->isSettled()) {
+            // An invoice says a customer was charged and their wallet funded.
+            // Issuing one for a payment that never settled would document money
+            // that does not exist, and this service can be called from outside
+            // the settlement path.
+            throw PaymentNotVerifiable::notOpen($payment->status->value);
+        }
+
         $number = $this->numberForPayment($payment);
 
         $existing = Invoice::query()->where('number', $number)->first();
