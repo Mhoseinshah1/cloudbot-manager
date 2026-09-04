@@ -13,6 +13,7 @@ use App\Models\Server;
 use App\Models\Subscription;
 use App\Models\User;
 use App\Models\WalletTransaction;
+use App\Provisioning\CreateBudget;
 use App\Provisioning\ProvisioningService;
 use App\Provisioning\ReconciliationService;
 use Illuminate\Support\Facades\DB;
@@ -287,4 +288,119 @@ it('numbers concurrent attempts without collision', function (): void {
 
     // The unique index decides; nothing counted in PHP.
     expect($numbers)->toBe(array_values(array_unique($numbers)));
+});
+
+it('commits the create reservation and stage before the create body runs', function (): void {
+    // What a worker dying inside createServer() leaves behind, read from a
+    // genuinely separate PostgreSQL session so it can only see committed work.
+    // Counting the attempt afterwards would let a crash loop build servers
+    // forever, each one leaving no record that it happened.
+    $order = $this->floor->paidOrder();
+    $observed = [];
+
+    $scripted = Simulator::script();
+    $scripted->beforeCreate(function () use ($order, &$observed): void {
+        $probe = CommitProbe::open();
+
+        $observed = [
+            'transaction_level' => DB::transactionLevel(),
+            'attempts' => $probe->readAttempts((int) $order->getKey()),
+            'attempt' => $probe->readLatestAttempt((int) $order->getKey()),
+            'order' => $probe->readOrder((int) $order->getKey()),
+        ];
+
+        $probe->close();
+    });
+
+    // The response is then lost, exactly as a dying worker would look.
+    $scripted->afterCreate(static function ($server): never {
+        throw App\Cloud\Exceptions\ProviderException::uncertain(
+            App\Cloud\Fake\FakeProvider::CODE, 'The response never arrived.',
+        );
+    });
+
+    app(ProvisioningService::class)->provision($order);
+
+    expect($observed['transaction_level'])->toBe(0)
+        // The attempt was spent before the call, not after it.
+        ->and($observed['attempts'])->toBe(1)
+        // And history already says a create was reached, not that one was
+        // merely about to be.
+        ->and($observed['attempt']['stage'])->toBe('create')
+        ->and($observed['attempt']['outcome'])->toBe('in_flight')
+        ->and($observed['order']['status'])->toBe(OrderStatus::Provisioning->value);
+
+    $fresh = Order::query()->findOrFail($order->getKey());
+
+    // The token is unchanged and nothing was refunded: the outcome is unknown.
+    expect($fresh->provisioning_uuid)->toBe($observed['order']['provisioning_uuid'])
+        ->and($fresh->status)->toBe(OrderStatus::NeedsAttention)
+        ->and(FakeProviderServer::query()->count())->toBe(1)
+        ->and((int) User::query()->findOrFail($this->floor->customer->getKey())->wallet_balance_toman)
+        ->toBe((int) WalletTransaction::query()
+            ->where('user_id', $this->floor->customer->getKey())->sum('amount_toman'));
+});
+
+it('lets only one worker take the last create attempt', function (): void {
+    $order = $this->floor->paidOrder();
+    $orderId = (int) $order->getKey();
+    $max = app(CreateBudget::class)->maximum();
+
+    app(ProvisioningService::class)->prepare($order);
+
+    // One attempt short of the cap, so the race is for the final slot.
+    DB::table('orders')->where('id', $orderId)->update(['attempts' => $max - 1]);
+
+    $results = ForkedWorkers::run(6, function () use ($orderId): array {
+        try {
+            $reserved = app(CreateBudget::class)->reserve(Order::query()->findOrFail($orderId));
+
+            return ['reserved' => $reserved];
+        } catch (Throwable $exception) {
+            return ['error' => $exception::class];
+        }
+    });
+
+    $winners = array_filter($results, static fn (array $r): bool => ($r['reserved'] ?? null) !== null);
+    $attempts = (int) DB::table('orders')->where('id', $orderId)->value('attempts');
+
+    // PostgreSQL is the arbiter. A read-then-save would let several workers see
+    // "two of three used" and all create.
+    expect($winners)->toHaveCount(1)
+        ->and($attempts)->toBe($max)
+        ->and($attempts)->not->toBeGreaterThan($max)
+        ->and(array_column($winners, 'reserved'))->toBe([$max]);
+});
+
+it('makes no create past the maximum when workers race at the cap', function (): void {
+    $order = $this->floor->paidOrder();
+    $orderId = (int) $order->getKey();
+    $max = app(CreateBudget::class)->maximum();
+
+    app(ProvisioningService::class)->prepare($order);
+    DB::table('orders')->where('id', $orderId)->update(['attempts' => $max - 1]);
+
+    ForkedWorkers::run(5, function () use ($orderId): array {
+        try {
+            app(ProvisioningService::class)->provision(Order::query()->findOrFail($orderId));
+
+            return ['ok' => true];
+        } catch (Throwable $exception) {
+            return ['error' => $exception::class];
+        }
+    });
+
+    $fresh = Order::query()->findOrFail($orderId);
+
+    expect((int) DB::table('orders')->where('id', $orderId)->value('attempts'))->toBe($max)
+        // One machine, one token, whatever the workers did.
+        ->and(FakeProviderServer::query()->count())->toBeLessThanOrEqual(1)
+        ->and(Server::query()->count())->toBeLessThanOrEqual(1)
+        ->and(Subscription::query()->count())->toBe(Server::query()->count())
+        ->and($fresh->provisioning_uuid)->not->toBeNull();
+
+    if (FakeProviderServer::query()->count() === 1) {
+        expect(FakeProviderServer::query()->firstOrFail()->provisioning_token)
+            ->toBe($fresh->provisioning_uuid);
+    }
 });

@@ -6,6 +6,7 @@ namespace App\Console\Commands;
 
 use App\Models\Order;
 use App\Provisioning\Data\ProvisioningResult;
+use App\Provisioning\ProvisioningDispatcher;
 use App\Provisioning\ReconciliationService;
 use Illuminate\Console\Command;
 use Throwable;
@@ -31,12 +32,12 @@ final class ReconcileProvisioningCommand extends Command
 
     protected $description = 'Resolve orders whose provisioning outcome is unknown, using their provisioning token';
 
-    public function handle(ReconciliationService $reconciliation): int
+    public function handle(ReconciliationService $reconciliation, ProvisioningDispatcher $dispatcher): int
     {
         $one = $this->option('order');
 
         if ($one !== null && $one !== '') {
-            return $this->reconcileOne($reconciliation, (int) $one);
+            return $this->reconcileOne($reconciliation, $dispatcher, (int) $one);
         }
 
         $limit = $this->option('limit');
@@ -64,7 +65,10 @@ final class ReconcileProvisioningCommand extends Command
         foreach ($orders as $order) {
             try {
                 $result = $reconciliation->reconcile($order);
-                $this->report($order, $result);
+
+                // The repair itself. A sweep that only reported "retryable"
+                // would leave a lost queue delivery lost forever.
+                $this->report($order, $result, $dispatcher->dispatchIfSafe($result));
             } catch (Throwable $exception) {
                 // One order that cannot be reconciled must not stop the rest:
                 // the others are customers waiting too.
@@ -78,8 +82,11 @@ final class ReconcileProvisioningCommand extends Command
         return $failures === 0 ? self::SUCCESS : self::FAILURE;
     }
 
-    private function reconcileOne(ReconciliationService $reconciliation, int $orderId): int
-    {
+    private function reconcileOne(
+        ReconciliationService $reconciliation,
+        ProvisioningDispatcher $dispatcher,
+        int $orderId,
+    ): int {
         $order = Order::query()->whereKey($orderId)->first();
 
         if (! $order instanceof Order) {
@@ -89,7 +96,11 @@ final class ReconcileProvisioningCommand extends Command
         }
 
         try {
-            $this->report($order, $reconciliation->reconcile($order));
+            $result = $reconciliation->reconcile($order);
+
+            // Targeted reconciliation repairs too. An operator naming a stuck
+            // order is asking for it to be fixed, not described.
+            $this->report($order, $result, $dispatcher->dispatchIfSafe($result));
         } catch (Throwable $exception) {
             $this->error("Order {$order->order_number}: ".$exception->getMessage());
 
@@ -99,12 +110,16 @@ final class ReconcileProvisioningCommand extends Command
         return self::SUCCESS;
     }
 
-    private function report(Order $order, ProvisioningResult $result): void
+    private function report(Order $order, ProvisioningResult $result, bool $dispatched = false): void
     {
         $line = "{$order->order_number}: {$result->state}";
 
         if ($result->detail !== null) {
             $line .= ' — '.$result->detail;
+        }
+
+        if ($dispatched) {
+            $line .= ' (provisioning queued)';
         }
 
         // needs_attention is the outcome an operator most needs to see, so it

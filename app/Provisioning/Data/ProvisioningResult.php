@@ -25,6 +25,20 @@ final readonly class ProvisioningResult
         public ?Server $server = null,
         public ?ProvisioningOutcome $outcome = null,
         public ?string $detail = null,
+        /**
+         * Whether it is safe to put provisioning work back on the queue.
+         *
+         * Narrower than `shouldRetry()` on purpose. Being worth trying again
+         * later is not the same as being worth dispatching a create-capable job
+         * for now: a provider we could not read, or a machine that already
+         * exists and is still building, are both retryable and neither is a
+         * reason to send a worker at the provider again this minute.
+         *
+         * Set only where reconciliation established, from a successful read,
+         * that no remote server carries the token and the create budget
+         * remains.
+         */
+        public bool $mayDispatch = false,
     ) {}
 
     /** A server exists and belongs to the customer. */
@@ -89,6 +103,19 @@ final readonly class ProvisioningResult
     public static function retryable(Order $order, ProvisioningOutcome $outcome, string $detail): self
     {
         return new self(self::Retryable, $order, outcome: $outcome, detail: $detail);
+    }
+
+    /**
+     * Retryable, and safe for a sweeper to schedule provisioning work for.
+     *
+     * Reserved for the one case that is genuinely a lost delivery: the provider
+     * was read successfully, it holds nothing for this token, the token is not
+     * spent, and the create budget has room. Anything less certain returns
+     * plain retryable and waits for the next sweep.
+     */
+    public static function retryableNow(Order $order, ProvisioningOutcome $outcome, string $detail): self
+    {
+        return new self(self::Retryable, $order, outcome: $outcome, detail: $detail, mayDispatch: true);
     }
 
     /** Whether the job that produced this should be tried again later. */

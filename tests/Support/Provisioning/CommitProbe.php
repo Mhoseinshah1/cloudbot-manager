@@ -78,6 +78,47 @@ final class CommitProbe
         ];
     }
 
+    /**
+     * The durable create budget another session can see for this order.
+     */
+    public function readAttempts(int $orderId): ?int
+    {
+        $statement = $this->pdo->prepare('SELECT attempts FROM orders WHERE id = :id');
+        $statement->execute(['id' => $orderId]);
+
+        /** @var array<string, mixed>|false $row */
+        $row = $statement->fetch(PDO::FETCH_ASSOC);
+
+        return $row === false ? null : (int) $row['attempts'];
+    }
+
+    /**
+     * The newest provisioning attempt another session can see for this order.
+     *
+     * @return array{attempt_no: int, stage: string, outcome: string}|null
+     */
+    public function readLatestAttempt(int $orderId): ?array
+    {
+        $statement = $this->pdo->prepare(
+            'SELECT attempt_no, stage, outcome FROM provisioning_attempts
+             WHERE order_id = :id ORDER BY attempt_no DESC LIMIT 1'
+        );
+        $statement->execute(['id' => $orderId]);
+
+        /** @var array<string, mixed>|false $row */
+        $row = $statement->fetch(PDO::FETCH_ASSOC);
+
+        if ($row === false) {
+            return null;
+        }
+
+        return [
+            'attempt_no' => (int) $row['attempt_no'],
+            'stage' => (string) $row['stage'],
+            'outcome' => (string) $row['outcome'],
+        ];
+    }
+
     public function close(): void
     {
         // PDO closes with the object; the explicit call documents intent at the

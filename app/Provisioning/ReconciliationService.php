@@ -51,6 +51,7 @@ final readonly class ReconciliationService
         private OrderPlanner $planner,
         private TokenLookup $tokens,
         private AttemptRecorder $attempts,
+        private CreateBudget $budget,
         private ServerPersister $persister,
         private RefundService $refunds,
         private OperationalAlerts $alerts,
@@ -248,16 +249,20 @@ final readonly class ReconciliationService
      */
     private function resolveAbsence(Order $order): ProvisioningResult
     {
-        $max = (int) config('cloudbot.provisioning.max_attempts', 3);
-        $made = $this->attempts->attemptCount($order);
-
-        if ($made < $max) {
-            // Attempts remain. The job may try again — and when it does it will
-            // reconcile this same token before creating anything.
-            return ProvisioningResult::retryable(
+        // Measured against the durable create budget, not the number of
+        // forensic rows. Reconciliation and persistence attempts write rows
+        // without ever reaching a create, and counting those would refund a
+        // customer whose order has not yet asked for a server even once.
+        if (! $this->budget->isExhausted($order)) {
+            // A lost delivery, and this is what repairs it. The provider was
+            // read successfully and holds nothing, the token is unspent and the
+            // budget has room — so provisioning work is safe to schedule, and
+            // the caller does schedule it. Returning the word "retryable" and
+            // stopping there would leave the order stuck forever.
+            return ProvisioningResult::retryableNow(
                 $order,
                 ProvisioningOutcome::TransientFailure,
-                'No remote server carries this token; provisioning may be attempted again.',
+                'No remote server carries this token; provisioning is being attempted again.',
             );
         }
 

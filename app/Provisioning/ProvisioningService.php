@@ -74,6 +74,7 @@ final readonly class ProvisioningService
         private OrderPlanner $planner,
         private TokenLookup $tokens,
         private AttemptRecorder $attempts,
+        private CreateBudget $budget,
         private ServerPersister $persister,
         private ProvisioningLock $lock,
         private RefundService $refunds,
@@ -280,6 +281,20 @@ final readonly class ProvisioningService
      */
     private function createFresh(Order $order, ProvisioningPlan $plan, CloudProviderInterface $provider): ProvisioningResult
     {
+        // The caller has just read the provider successfully and found nothing
+        // for this token. With the create budget also spent, that is a
+        // confirmed absence and an exhausted policy together — the one
+        // combination that owes the customer their money back.
+        if ($this->budget->isExhausted($order)) {
+            return $this->refundConfirmed(
+                $order,
+                $plan,
+                ConfirmedNoServerOutcome::ReconciliationConfirmedNoServer,
+                ProvisioningOutcome::RejectedNoServer,
+                'No server was created after the maximum number of attempts.',
+            );
+        }
+
         $attempt = $this->attempts->open($order, ProvisioningStage::BeforeCreate, $plan);
 
         // Asked again, immediately before creating. Capacity changes between a
@@ -313,6 +328,30 @@ final readonly class ProvisioningService
                 'That plan is no longer available in that location.',
             );
         }
+
+        // Reserved before the call, and committed on its own. A worker that
+        // dies inside createServer() has still spent its attempt: counting
+        // afterwards would let a crash loop build servers forever, each one
+        // leaving no record that it happened.
+        //
+        // Atomic, so two workers cannot both claim the last attempt. Losing
+        // here is not an error — either the budget is spent or somebody else
+        // took it, and in both cases this worker must not create.
+        if ($this->budget->reserve($order) === null) {
+            $this->attempts->close(
+                $attempt, ProvisioningStage::BeforeCreate, ProvisioningOutcome::TransientFailure,
+            );
+
+            return ProvisioningResult::retryable(
+                $order,
+                ProvisioningOutcome::TransientFailure,
+                'No provider create attempt was available for this order.',
+            );
+        }
+
+        // Committed before the network call, so forensic history says a create
+        // was reached even if this process never returns from it.
+        $this->attempts->enterCreateStage($attempt);
 
         $request = new CreateServerRequest(
             // Exactly the committed token. Not a new one, not a derived one.
@@ -584,19 +623,23 @@ final readonly class ProvisioningService
      */
     private function exhaustedOrRetry(Order $order, ProvisioningPlan $plan, string $reason): ProvisioningResult
     {
-        $max = (int) config('cloudbot.provisioning.max_attempts', 3);
-
-        if ($this->attempts->attemptCount($order) < $max) {
+        // Against the durable create budget, not the count of forensic rows. A
+        // reconciliation that only read the provider, or an availability check
+        // that failed before anything was sent, wrote a row without ever
+        // reaching a create; counting those would retire an order that has
+        // never actually asked for a server.
+        if (! $this->budget->isExhausted($order)) {
             return ProvisioningResult::retryable($order, ProvisioningOutcome::TransientFailure, $reason);
         }
 
-        // Out of attempts. A person decides now; the money has not moved.
+        // Out of create attempts. A person decides now; the money has not
+        // moved, because a transient failure is not evidence of absence.
         return $this->parkNeedsAttention(
             $order,
             ProvisioningOutcome::TransientFailure,
             'attempts_exhausted',
             $reason,
-            ['attempts' => $this->attempts->attemptCount($order)],
+            ['attempts' => $this->budget->used($order)],
         );
     }
 

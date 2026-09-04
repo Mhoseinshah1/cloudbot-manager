@@ -87,6 +87,31 @@ final readonly class AttemptRecorder
     }
 
     /**
+     * Record that this attempt has reached the create call, and commit.
+     *
+     * Called after availability succeeds and the create budget is reserved,
+     * immediately before the provider is asked to build anything. Without it a
+     * worker that dies inside createServer() leaves a row still claiming the
+     * stage was `before_create` — forensic history saying no create was reached
+     * when one may have been, which is the most misleading thing this table
+     * could tell an operator investigating a possible orphan.
+     *
+     * The outcome stays in flight: what happened is still unknown, and that is
+     * the honest value until the call returns.
+     */
+    public function enterCreateStage(ProvisioningAttempt $attempt): ProvisioningAttempt
+    {
+        // Committed on its own, outside any transaction the caller holds, so
+        // the record is durable before the network call begins.
+        $attempt->forceFill([
+            'stage' => ProvisioningStage::Create,
+            'outcome' => ProvisioningOutcome::InFlight,
+        ])->save();
+
+        return $attempt;
+    }
+
+    /**
      * Close an attempt with what actually happened.
      *
      * @param  array<string, scalar|null>  $extra  Additional safe facts.
@@ -123,12 +148,6 @@ final readonly class AttemptRecorder
         }
 
         return $attempt;
-    }
-
-    /** How many calls this order has already made. */
-    public function attemptCount(Order $order): int
-    {
-        return ProvisioningAttempt::query()->where('order_id', $order->getKey())->count();
     }
 
     /**
