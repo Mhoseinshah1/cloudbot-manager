@@ -19,7 +19,11 @@ it('creates the failed jobs table', function (): void {
 });
 
 it('creates the identity and administration tables', function (): void {
-    foreach (['users', 'telegram_accounts', 'settings', 'audit_logs', 'roles', 'permissions'] as $table) {
+    foreach ([
+        'users', 'telegram_accounts', 'settings', 'audit_logs', 'roles', 'permissions',
+        'providers', 'provider_credentials', 'provider_locations', 'provider_plans', 'provider_images',
+        'fake_provider_servers', 'fake_provider_actions',
+    ] as $table) {
         expect(Schema::hasTable($table))->toBeTrue("expected {$table}");
     }
 });
@@ -29,7 +33,6 @@ it('ships no table belonging to a later phase', function (): void {
     // Telegram update handling each arrive in their own phase; finding one of
     // these here means work was pulled forward.
     $laterPhases = [
-        'providers', 'provider_credentials', 'provider_locations', 'provider_plans', 'provider_images',
         'products', 'product_location_prices', 'exchange_rates',
         'wallet_transactions', 'payments', 'invoices',
         'orders', 'provisioning_attempts', 'servers', 'server_actions', 'subscriptions',

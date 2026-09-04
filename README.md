@@ -20,6 +20,7 @@ identity model exist; none of the product features do — see
 - Customer and administrator identity, Telegram account records, database-backed
   settings and an append-only audit trail
 - An admin panel behind role-based access and mandatory two-factor authentication
+- A provider abstraction with a zero-network FakeProvider and a conformance suite
 
 ## Requirements
 
@@ -153,6 +154,51 @@ codes, and never written to the session, logs or the audit trail.
 The requirement can be relaxed outside production for automated tests. In
 production it always applies, regardless of configuration.
 
+## Cloud providers
+
+Providers sit behind one small interface. Anything not needed to sell, deliver
+and remove a server is an optional capability interface instead, so a provider
+that lacks it simply does not implement it rather than implementing it to throw.
+What a provider can do is answered by asking the adapter, never by a list
+maintained alongside it.
+
+Nothing provider-native crosses the boundary: adapters return normalized objects,
+and failures are thrown with a normalized category so business code never has to
+read an HTTP status or a message to decide whether to retry, refund or reconcile.
+
+**Implementations are named only in `config/providers.php`.** The `code` on a
+provider row selects an entry there. A class name is never stored in the
+database, because a write to that table would otherwise decide what code this
+application instantiates.
+
+### FakeProvider
+
+`FakeProvider` implements the full contract and never touches the network. It is
+for the test suite, local development and staging demonstrations — it is not a
+stub: creating, listing, powering, rebooting and deleting all behave as the
+contract requires, including returning the same server when a create is retried
+with the same provisioning token.
+
+Its simulated remote state lives in PostgreSQL, in tables named
+`fake_provider_*`. That is deliberate. State in a static array would not survive
+a queue worker or a restart, and only a database can enforce the unique
+constraint on the provisioning token that makes create idempotency true under
+concurrency rather than merely likely.
+
+Those tables stand in for another company's infrastructure. They are not the
+local record of a server a customer bought, which arrives in a later phase.
+
+### Conformance suite
+
+`Tests\Support\Cloud\ProviderConformance` defines the behaviour every adapter
+must exhibit, written against the interface alone. FakeProvider runs through it
+today; the Hetzner adapter will run through the same suite unchanged rather than
+getting a copy that can drift.
+
+**There is no Hetzner implementation yet**, and no registry entry for one: an
+entry pointing at a provider that cannot provision would be a promise the system
+could not keep.
+
 ## Operational notes
 
 - **`APP_KEY` is generated once and preserved.** It encrypts stored credentials;
@@ -173,8 +219,7 @@ production it always applies, regardless of configuration.
 
 Nothing below exists in the repository yet. Each arrives in its own phase:
 
-the provider abstraction, FakeProvider and Hetzner · wallet, payments and
-invoices · products, pricing and exchange rates · orders and refunds ·
+the Hetzner adapter · wallet, payments and invoices · products, pricing and exchange rates · orders and refunds ·
 provisioning and reconciliation · the Telegram bot itself, including webhook
 handling and the buy flow · subscriptions, renewals and expiry · notifications ·
 the operational admin screens (the panel currently has sign-in and two-factor
