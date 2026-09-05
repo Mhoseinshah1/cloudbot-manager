@@ -115,6 +115,27 @@ final readonly class ServerActionExecutor
             return;
         }
 
+        // A reservation nobody has recorded an outcome for. `attempts` above
+        // zero with no retryable category and no handle is the shape this
+        // method's own reservation leaves behind, and it means a provider write
+        // may be in flight right now — the worker that took it is inside the
+        // call, or died there. Either way the machine's fate is unknown, and
+        // "unknown" is not permission to send a delete again.
+        //
+        // The per-server lock is not what stops this. It is coordination: it
+        // can expire while a call is still outstanding, it can be lost with
+        // Redis, and it is released by a worker that stalls. A duplicate that
+        // arrives afterwards finds a row that looks like ordinary pending work,
+        // and only the durable evidence tells it otherwise.
+        //
+        // Stated here as well as in the reservation's WHERE clause. The
+        // database is the authority — this model was read before the other
+        // worker committed — but a reader deciding whether to call a provider
+        // should be able to see the reason in the code that calls it.
+        if ($action->attempts > 0 && ! $this->actions->lastCallIsKnownSafe($action)) {
+            return;
+        }
+
         // Reserved before the call, never counted after it. A worker that dies
         // inside a delete has still spent its attempt; counting afterwards is
         // how a crash loop sends the same destructive request forever.
@@ -123,13 +144,7 @@ final readonly class ServerActionExecutor
         // worker that dies after this point leaves no stale "safely refused"
         // fact for reconciliation to mistake for this attempt's outcome.
         if (! $this->actions->reserveAttempt($action, $this->maximumAttempts())) {
-            // Refused for one of several reasons, and only one of them is
-            // exhaustion. Somebody else took the action, it acquired a provider
-            // handle, or a barrier was written between the checks above and
-            // this statement — none of which is an action to park.
-            if ($action->attempts >= $this->maximumAttempts()) {
-                $this->exhausted($action);
-            }
+            $this->refusedReservation($action);
 
             return;
         }
@@ -649,6 +664,62 @@ final readonly class ServerActionExecutor
 
             return null;
         }
+    }
+
+    /**
+     * A reservation was refused. Decide what that meant, from the row as it is now.
+     *
+     * Refusal is not exhaustion. It also happens when another worker took the
+     * action first, when it acquired a provider handle, when it became running,
+     * when a barrier was written between the checks above and the statement —
+     * and, the case this method exists for, when a provider write is currently
+     * outstanding.
+     *
+     * The pre-reservation model cannot tell those apart, because whatever
+     * refused it committed after that model was read. So the row is read again,
+     * and parking is allowed only where the fresh state proves there is nothing
+     * to park on top of: still open, out of attempts, no handle, and a last call
+     * the enum itself calls safe.
+     *
+     * The shape deliberately excluded is `attempts >= max` with no category and
+     * no handle. That is a spent reservation whose outcome nobody recorded, and
+     * parking it here is how a duplicate delivery marks `needs_attention` on an
+     * operation that is still succeeding — leaving the worker that owns the call
+     * unable to settle its own result, because the compare-and-set it settles
+     * with only accepts an open action. Reconciliation owns that decision, after
+     * it has asked the provider what actually happened.
+     */
+    private function refusedReservation(ServerAction $action): void
+    {
+        $fresh = ServerAction::query()->whereKey($action->getKey())->first();
+
+        if (! $fresh instanceof ServerAction || ! $fresh->isOpen()) {
+            // Somebody settled it. Nothing to say.
+            return;
+        }
+
+        if ($fresh->status !== ServerActionStatus::Pending || $fresh->provider_action_id !== null) {
+            // An operation is outstanding at the provider. Polling settles it.
+            return;
+        }
+
+        if ($fresh->attempts < $this->maximumAttempts()) {
+            // Budget remains, so refusal meant a barrier or an unresolved
+            // reservation. Left exactly as it is.
+            return;
+        }
+
+        if (! $this->actions->lastCallIsKnownSafe($fresh)) {
+            Log::info('server_action.reservation_refused_outcome_unknown', [
+                'server_action_id' => $fresh->getKey(),
+                'action' => $fresh->action->value,
+                'attempts' => $fresh->attempts,
+            ]);
+
+            return;
+        }
+
+        $this->exhausted($fresh);
     }
 
     private function exhausted(ServerAction $action): void

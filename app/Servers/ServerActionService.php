@@ -187,6 +187,25 @@ final readonly class ServerActionService
      * how a crash loop sends the same destructive request forever. The bound is
      * in the WHERE clause, so two workers cannot both take the last one.
      *
+     * Two durable shapes may be initiated, and only two.
+     *
+     * `attempts` is zero: no reservation has ever been taken, so no provider
+     * write can have started.
+     *
+     * Or the last call completed and is known to have changed nothing — a
+     * category the enum calls retryable, recorded against an action holding no
+     * provider handle. That pairing is evidence: the call finished, the provider
+     * refused it in a way that takes no effect, nothing is outstanding.
+     *
+     * Everything else is refused, and the shape that matters is the one this
+     * method itself creates: `attempts > 0` with no category and no handle. That
+     * is a reservation whose outcome nobody has written down — a provider write
+     * that may be in flight this second — and it is indistinguishable, from the
+     * row alone, from a worker that died inside a delete. Redis cannot be what
+     * refuses the second one: a coordination lock can expire, be lost, or be
+     * released by a stalled process, and the duplicate then arrives to a row
+     * that looks like ordinary pending work.
+     *
      * @return bool Whether this worker may proceed.
      */
     public function reserveAttempt(ServerAction $action, int $maximum): bool
@@ -194,6 +213,17 @@ final readonly class ServerActionService
         return ServerAction::query()
             ->whereKey($action->getKey())
             ->where('attempts', '<', $maximum)
+            // The durable executability rule, and the reason a duplicate cannot
+            // send a second delete. Asked of the database rather than of a PHP
+            // model, because the model was read before the other worker's
+            // reservation committed and says so.
+            ->where(function (Builder $query): void {
+                $query->where('attempts', 0)
+                    // Tied to `isRetryable()` rather than spelled out, so the
+                    // database and the executor cannot come to different
+                    // conclusions about what is safe to repeat.
+                    ->orWhereIn('error_category', ProviderErrorCategory::retryableValues());
+            })
             // Pending only. `Running` means the provider accepted an operation
             // and is still working on it, and initiating a second one would ask
             // for the same reboot or the same delete twice. The per-server lock

@@ -89,4 +89,24 @@ enum ProviderErrorCategory: string
     {
         return array_map(static fn (self $case): string => $case->value, self::cases());
     }
+
+    /**
+     * The stored values of every category this enum calls retryable.
+     *
+     * For the one place a SQL predicate has to ask the same question PHP asks:
+     * the reservation that decides whether a provider write may be initiated
+     * again. Derived from `isRetryable()` rather than written out, so a category
+     * that changes its mind — or a new one — cannot leave the database
+     * authorizing a repeat the code no longer would. A literal list in a WHERE
+     * clause is a copy of this judgement that nothing keeps in step.
+     *
+     * @return list<string>
+     */
+    public static function retryableValues(): array
+    {
+        return array_values(array_map(
+            static fn (self $case): string => $case->value,
+            array_filter(self::cases(), static fn (self $case): bool => $case->isRetryable()),
+        ));
+    }
 }
