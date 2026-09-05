@@ -6,6 +6,7 @@ namespace App\Cloud\Contracts;
 
 use App\Cloud\Data\CreateServerRequest;
 use App\Cloud\Data\ProviderActionData;
+use App\Cloud\Data\ProviderCreateResult;
 use App\Cloud\Data\ProviderImageData;
 use App\Cloud\Data\ProviderLocationData;
 use App\Cloud\Data\ProviderPlanData;
@@ -83,9 +84,19 @@ interface CloudProviderInterface
      * second server, and must never reshape the existing one to match
      * different parameters.
      *
+     * The return type is create-specific rather than the ordinary server shape,
+     * and that is the point: a create response may carry a one-time root
+     * password, and no other call may. `getServer()` and `listServers()` are
+     * read by reconciliation, inventory and logs constantly, so a credential
+     * field on the shape they return would be a credential in all of them.
+     *
+     * A repeat that returns an existing server carries no credential. A
+     * one-time password is issued once, and a provider replaying an earlier
+     * result has none left to give — recovery rotates rather than remembers.
+     *
      * @throws ProviderException
      */
-    public function createServer(CreateServerRequest $request): ProviderServerData;
+    public function createServer(CreateServerRequest $request): ProviderCreateResult;
 
     /**
      * Read one server, or establish that it is not there.

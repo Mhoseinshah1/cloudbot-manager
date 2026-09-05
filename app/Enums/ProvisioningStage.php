@@ -25,6 +25,16 @@ enum ProvisioningStage: string
     case Persist = 'persist';
 
     /**
+     * A machine exists and its one-time credential was lost before delivery.
+     *
+     * Its own stage, and counted on its own, because it is not a create. The
+     * create budget on `orders.attempts` governs how many machines this order
+     * may ask for; spending one of those on rotating a password would let a run
+     * of reset failures retire an order whose machine is sitting there working.
+     */
+    case CredentialRecovery = 'credential_recovery';
+
+    /**
      * Whether a failure at this stage could have left a remote server behind.
      *
      * The question the refund boundary actually asks. Only `BeforeCreate` can
@@ -33,6 +43,17 @@ enum ProvisioningStage: string
     public function mayHaveCreatedRemotely(): bool
     {
         return $this !== self::BeforeCreate;
+    }
+
+    /**
+     * Whether this stage counts against the provider create budget.
+     *
+     * Only the create does. Reads, persistence retries and credential recovery
+     * all leave forensic rows without ever asking for a machine.
+     */
+    public function spendsCreateBudget(): bool
+    {
+        return $this === self::Create;
     }
 
     /**

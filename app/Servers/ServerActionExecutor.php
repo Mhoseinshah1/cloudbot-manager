@@ -96,6 +96,17 @@ final readonly class ServerActionExecutor
             return;
         }
 
+        // The durable barrier, checked after the lock and before the attempt.
+        // A provider that asked us to wait wrote a time to PostgreSQL, and a
+        // duplicate job that was already queued when it did would otherwise
+        // call straight past it — releasing the worker that received the
+        // refusal delays only that worker. Nothing is sent, nothing is
+        // recorded, and no attempt is spent; the reconciler offers this action
+        // again once it is genuinely due.
+        if (! $action->mayAttemptNow()) {
+            return;
+        }
+
         // Reserved before the call, never counted after it. A worker that dies
         // inside a delete has still spent its attempt; counting afterwards is
         // how a crash loop sends the same destructive request forever.
@@ -121,23 +132,26 @@ final readonly class ServerActionExecutor
      *
      * Used by the reconciler. A provider that cannot be read is not an action
      * that failed — saying so would let a network blip settle a delete.
+     *
+     * @return bool Whether the caller should queue execution work for this
+     *              action once it has released the server's lock. The dispatch
+     *              deliberately does not happen here: a job queued from inside
+     *              the lock it needs would find it held by its own caller.
      */
-    public function poll(ServerAction $action, Server $server): void
+    public function poll(ServerAction $action, Server $server): bool
     {
         if (! $action->isOpen()) {
-            return;
+            return false;
         }
 
         $provider = $this->resolveProvider($action, $server);
 
         if (! $provider instanceof CloudProviderInterface) {
-            return;
+            return false;
         }
 
         if ($action->provider_action_id === null) {
-            $this->reconcileWithoutActionId($action, $server, $provider);
-
-            return;
+            return $this->reconcileWithoutActionId($action, $server, $provider);
         }
 
         try {
@@ -149,10 +163,12 @@ final readonly class ServerActionExecutor
                 'category' => $exception->category->value,
             ]);
 
-            return;
+            return false;
         }
 
         $this->handleResult($action, $server, $result);
+
+        return false;
     }
 
     /**
@@ -235,15 +251,40 @@ final readonly class ServerActionExecutor
         CloudProviderInterface $provider,
         ProviderException $exception,
     ): void {
-        if (! $exception->category->isOutcomeUnknown()) {
-            $this->actions->settle($action, ServerActionStatus::Failed, category: $exception->category);
+        if ($exception->category->isOutcomeUnknown()) {
+            // Nobody knows whether it happened. Never repeat it blindly; look
+            // for a fact that settles the question instead.
+            $this->reconcileUncertain($action, $server, $provider, $exception->category);
 
             return;
         }
 
-        // Nobody knows whether it happened. Never repeat it blindly; look for a
-        // fact that settles the question instead.
-        $this->reconcileUncertain($action, $server, $provider, $exception->category);
+        if ($exception->category->isRetryable()) {
+            // The category itself says repeating this could work — a rate
+            // limit, a short outage, a transient error. Settling it as failed
+            // threw a customer's power off or delete away because the provider
+            // was busy for a minute, and left the action's remaining durable
+            // attempts permanently unspent, because a failed action is
+            // excluded from reconciliation.
+            //
+            // So it stays open, with the category recorded as evidence that
+            // this call completed and changed nothing, and a durable deadline
+            // that every worker honours. The attempt it spent stays spent, and
+            // the attempt cap is what stops this being forever.
+            $this->actions->postpone($action, $this->retryAfterSeconds(), $exception->category);
+
+            Log::info('server_action.retryable_failure', [
+                'server_action_id' => $action->getKey(),
+                'action' => $action->action->value,
+                'category' => $exception->category->value,
+            ]);
+
+            return;
+        }
+
+        // Deterministic, and nothing was created or changed by it. Repeating
+        // the identical request cannot produce a different answer.
+        $this->actions->settle($action, ServerActionStatus::Failed, category: $exception->category);
     }
 
     /**
@@ -282,14 +323,104 @@ final readonly class ServerActionExecutor
         ServerAction $action,
         Server $server,
         CloudProviderInterface $provider,
-    ): void {
+    ): bool {
         if ($this->settleFromRemoteState($action, $server, $provider)) {
-            return;
+            return false;
         }
 
-        // Nothing to poll and nothing conclusive to read. Left open for the
-        // executor to try again while attempts remain; the attempt cap is what
-        // stops that being forever.
+        // Nothing to poll and nothing conclusive to read. Whether that means
+        // "send it" or "ask a person" turns on one question, and it is not the
+        // one that looks obvious: not whether the action is still pending, but
+        // whether this action's provider write is known never to have started.
+        //
+        // Redispatching every pending action with no provider handle would be
+        // the naive repair and it is dangerous — an attempt reserved by a
+        // worker that then died is not proof the provider was never called, and
+        // a second delete is not recoverable.
+        if ($this->mayRedispatch($action)) {
+            // Same action row, same idempotency key, same business intent. A
+            // repeated sweep before the job runs is safe: the job re-reads
+            // under the server's lock, honours the same durable barrier, and
+            // reserves its own attempt.
+            //
+            // The caller queues it, once this lock is released.
+            Log::info('server_action.redispatch_requested', [
+                'server_action_id' => $action->getKey(),
+                'action' => $action->action->value,
+                'attempts' => $action->attempts,
+            ]);
+
+            return true;
+        }
+
+        if ($action->attempts > 0 && ! $this->actions->lastCallIsKnownSafe($action)) {
+            // An attempt was reserved and no durable outcome was ever written.
+            // That is not evidence the provider did nothing — the reservation
+            // commits before the call precisely so a worker that dies inside
+            // one has still spent it. Repeating a reboot or a delete on that
+            // basis is exactly the guess this system does not make.
+            $this->actions->settle(
+                $action, ServerActionStatus::NeedsAttention, category: ProviderErrorCategory::UncertainResult,
+            );
+
+            Log::warning('server_action.attempt_without_outcome', [
+                'server_action_id' => $action->getKey(),
+                'action' => $action->action->value,
+                'attempts' => $action->attempts,
+            ]);
+
+            return false;
+        }
+
+        // Out of attempts on a known-safe failure. Nothing is outstanding at
+        // the provider, but the customer's request never happened, so it is a
+        // person's to decide rather than a silent success.
+        if ($action->attempts >= $this->maximumAttempts()) {
+            $this->exhausted($action);
+        }
+
+        // Otherwise the barrier has simply not expired yet. Left open, and the
+        // next sweep after it does will redispatch.
+        return false;
+    }
+
+    /**
+     * Whether it is safe to send this action to the provider again.
+     *
+     * Two cases, and only two.
+     *
+     * Nothing was ever attempted: `attempts` is zero, so no reservation was
+     * taken, so no provider call can have started. The original execution job
+     * was lost before it reached the provider — dropped, never delivered, or
+     * refused a lock until its single delivery was gone — and redispatching it
+     * is simply doing the work that was already promised.
+     *
+     * Or the last call completed and is known to have changed nothing: a
+     * category the enum calls retryable was recorded against an action that
+     * received no provider handle. That pairing is evidence, not optimism.
+     *
+     * Both are additionally bounded by the durable attempt budget and the
+     * durable retry barrier, so neither can become a loop.
+     */
+    private function mayRedispatch(ServerAction $action): bool
+    {
+        if (! $action->mayAttemptNow() || $action->attempts >= $this->maximumAttempts()) {
+            return false;
+        }
+
+        return $action->attempts === 0 || $this->actions->lastCallIsKnownSafe($action);
+    }
+
+    /**
+     * How long to wait before retrying a provider that asked us to.
+     *
+     * Bounded and configurable. The typed provider contract carries a category
+     * but no retry-after time, so there is nothing provider-supplied to honour
+     * here and a number is not invented per call site.
+     */
+    private function retryAfterSeconds(): int
+    {
+        return max(1, (int) $this->config->get('cloudbot.server_actions.retry_after_seconds', 120));
     }
 
     /**

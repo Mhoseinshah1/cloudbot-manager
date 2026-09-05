@@ -7,6 +7,8 @@ namespace App\Provisioning;
 use App\Audit\AuditEvent;
 use App\Audit\AuditRecorder;
 use App\Cloud\Contracts\CloudProviderInterface;
+use App\Cloud\Data\ProviderServerData;
+use App\Cloud\Data\SensitiveRootCredential;
 use App\Cloud\Enums\ProviderServerStatus;
 use App\Cloud\Exceptions\ProviderException;
 use App\Cloud\ProviderManager;
@@ -16,13 +18,16 @@ use App\Enums\ProvisioningOutcome;
 use App\Enums\ProvisioningStage;
 use App\Enums\SettingKey;
 use App\Models\Order;
+use App\Models\Server;
 use App\Orders\RefundService;
+use App\Provisioning\Data\ProvisioningPlan;
 use App\Provisioning\Data\ProvisioningResult;
 use App\Provisioning\Exceptions\RemoteIdentityConflict;
 use App\Provisioning\Exceptions\RemoteIdentityMismatch;
 use App\Settings\SettingsService;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\Collection;
+use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Support\Facades\DB;
 use Throwable;
 
@@ -56,12 +61,70 @@ final readonly class ReconciliationService
         private RefundService $refunds,
         private OperationalAlerts $alerts,
         private AuditRecorder $audit,
+        private ProvisioningLock $lock,
+        private CredentialRecovery $credentials,
     ) {}
 
     /**
      * Resolve one order against what its provider actually holds.
+     *
+     * Runs under the same per-order lock provisioning takes, and that is the
+     * whole point. Without it this method could read the provider while a
+     * worker's create call was still in flight, see nothing carrying the token,
+     * find the create budget already spent by the reservation that call made —
+     * and refund a customer whose machine was about to exist. Live server, full
+     * refund, no way back.
+     *
+     * The cheap eligibility questions below are asked first because they change
+     * nothing and answer most calls without waiting on anybody. Every decision
+     * that reads a provider, moves money, persists a server or schedules work
+     * happens after the lock, on a row read after the lock.
+     *
+     * A lock somebody else holds is not a reason to guess. It returns contended:
+     * no provider call, no refund, no dispatch, and emphatically no inference
+     * about what the provider holds — the worker that owns the lock is the one
+     * finding that out.
      */
     public function reconcile(Order $order): ProvisioningResult
+    {
+        // No state changes here, so it is safe outside the lock. It only avoids
+        // queueing behind a provider call to answer a question the order's own
+        // status already settles.
+        $ineligible = $this->ineligibleReason($order);
+
+        if ($ineligible instanceof ProvisioningResult) {
+            return $ineligible;
+        }
+
+        $result = $this->lock->attempt($order, function () use ($order): ProvisioningResult {
+            // Read after the lock, never before it. The pre-lock instance was
+            // loaded while another worker may have been part-way through this
+            // order's create, and every decision below turns on facts that
+            // worker was in the middle of changing.
+            $fresh = Order::query()->whereKey($order->getKey())->first();
+
+            if (! $fresh instanceof Order) {
+                throw new ModelNotFoundException('That order no longer exists.');
+            }
+
+            $ineligible = $this->ineligibleReason($fresh);
+
+            return $ineligible instanceof ProvisioningResult
+                ? $ineligible
+                : $this->reconcileUnderLock($fresh);
+        });
+
+        // Contended carries mayDispatch = false, so a sweep that could not get
+        // the lock queues no create-capable work behind the worker holding it.
+        return $result ?? ProvisioningResult::contended($order);
+    }
+
+    /**
+     * The questions that need no provider and change nothing.
+     *
+     * Returns a result when this order is not reconcilable, or null when it is.
+     */
+    private function ineligibleReason(Order $order): ?ProvisioningResult
     {
         if ($order->status === OrderStatus::Provisioned) {
             $server = $order->server;
@@ -83,6 +146,17 @@ final readonly class ReconciliationService
             return ProvisioningResult::notEligible($order, 'That order has no provisioning token.');
         }
 
+        return null;
+    }
+
+    /**
+     * Everything that reads a provider, moves money, or schedules work.
+     *
+     * Called only with this order's provisioning lock held and with `$order`
+     * read after that lock was taken.
+     */
+    private function reconcileUnderLock(Order $order): ProvisioningResult
+    {
         $plan = $this->planner->plan($order);
         $provider = $this->readableProvider($plan->providerCode);
 
@@ -142,10 +216,20 @@ final readonly class ReconciliationService
                 );
             }
 
+            // A machine that exists and has never been handed over. Whatever
+            // password its create response carried is gone — it lived in the
+            // memory of a worker that died, and no provider read will ever
+            // reveal it. One is issued now, before anything is delivered.
+            $credential = $this->credentialFor($order, $plan, $provider, $remote);
+
+            if ($credential instanceof ProvisioningResult) {
+                return $credential;
+            }
+
             $attempt = $this->attempts->open($order, ProvisioningStage::Persist, $plan);
 
             try {
-                $server = $this->persister->persist($order, $remote, $plan);
+                $server = $this->persister->persist($order, $remote, $plan, credential: $credential);
             } catch (RemoteIdentityMismatch|RemoteIdentityConflict $exception) {
                 $this->attempts->close(
                     $attempt, ProvisioningStage::Persist,
@@ -242,6 +326,56 @@ final readonly class ReconciliationService
         } catch (ProviderException) {
             return null;
         }
+    }
+
+    /**
+     * A usable root password for a machine that exists but was never delivered.
+     *
+     * Returns a credential, or a result the caller must return unchanged.
+     *
+     * Every branch here is about a machine that genuinely exists and is
+     * genuinely billable, which rules out two answers that would otherwise look
+     * reasonable. It never refunds: the customer's money bought a server that is
+     * running. And it never delivers without a credential: an order marked
+     * provisioned is an order the system says the customer has, and saying that
+     * about a machine nobody can log into is worse than admitting the problem.
+     */
+    private function credentialFor(
+        Order $order,
+        ProvisioningPlan $plan,
+        CloudProviderInterface $provider,
+        ProviderServerData $remote,
+    ): SensitiveRootCredential|ProvisioningResult|null {
+        // Already delivered. Its credential is on file, and rotating now would
+        // lock out a customer who has been given the one it replaces.
+        if (Server::query()->where('order_id', $order->getKey())->exists()) {
+            return null;
+        }
+
+        $recovered = $this->credentials->recover($order, $plan, $provider, $remote->providerServerId);
+
+        if ($recovered instanceof SensitiveRootCredential) {
+            return $recovered;
+        }
+
+        if ($recovered === CredentialRecovery::Retryable) {
+            // Budget remains, so nothing is claimed and nobody is told. Not
+            // retryableNow: dispatching create-capable work for an order whose
+            // machine already exists would be work for nothing.
+            return ProvisioningResult::retryable(
+                $order,
+                ProvisioningOutcome::TransientFailure,
+                'A root credential for this server could not be issued yet.',
+            );
+        }
+
+        return $this->park(
+            $order,
+            ProvisioningOutcome::Uncertain,
+            $recovered,
+            'The server exists but no usable root credential could be issued for it.',
+            ['provider_server_id' => $remote->providerServerId],
+        );
     }
 
     /**

@@ -197,6 +197,56 @@ final readonly class ServerActionService
             ->update(['attempts' => DB::raw('attempts + 1'), 'updated_at' => now()]) === 1;
     }
 
+    /**
+     * Hold a retryable failure open until a stated time, without settling it.
+     *
+     * For a provider answer the category itself declares safe to repeat — a
+     * rate limit, an outage, a transient error. Settling those as `failed`
+     * threw away a customer's power off or delete because the provider was busy
+     * for a minute, and a failed action is excluded from reconciliation, so the
+     * remaining durable attempts were never spent.
+     *
+     * Two things are written and both matter. The category is what a later
+     * sweep reads to know this action's last provider call completed with a
+     * known-safe outcome — which is the difference between a retry that is safe
+     * and one that might repeat a delete. The deadline is durable, so a
+     * duplicate job already queued cannot walk past it.
+     *
+     * Compare-and-set on the open statuses, so this cannot reopen an action
+     * somebody else has already settled.
+     *
+     * @return bool Whether this worker wrote the barrier.
+     */
+    public function postpone(ServerAction $action, int $seconds, ProviderErrorCategory $category): bool
+    {
+        return ServerAction::query()
+            ->whereKey($action->getKey())
+            ->whereIn('status', [ServerActionStatus::Pending->value, ServerActionStatus::Running->value])
+            ->update([
+                'retry_after' => CarbonImmutable::now()->addSeconds(max(1, $seconds)),
+                'error_category' => $category->value,
+                'updated_at' => now(),
+            ]) === 1;
+    }
+
+    /**
+     * Whether this action's last provider call is known to have changed nothing.
+     *
+     * True only when a category the enum itself calls retryable was recorded
+     * against an action that never received a provider handle. That pairing is
+     * the evidence: the call completed, the provider refused it in a way that
+     * takes no effect, and no operation is outstanding. Anything else — a
+     * timeout, an uncertain result, an attempt reserved by a worker that then
+     * died without recording an outcome — leaves open the possibility that the
+     * request landed, and a second delete is not something to guess about.
+     */
+    public function lastCallIsKnownSafe(ServerAction $action): bool
+    {
+        return $action->provider_action_id === null
+            && $action->error_category instanceof ProviderErrorCategory
+            && $action->error_category->isRetryable();
+    }
+
     /** This customer's action history for one server, newest first. */
     public function findByKey(string $idempotencyKey): ?ServerAction
     {

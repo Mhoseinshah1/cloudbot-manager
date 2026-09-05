@@ -8,7 +8,9 @@ use App\Audit\AuditEvent;
 use App\Audit\AuditRecorder;
 use App\Cloud\Contracts\CloudProviderInterface;
 use App\Cloud\Data\CreateServerRequest;
+use App\Cloud\Data\ProviderCreateResult;
 use App\Cloud\Data\ProviderServerData;
+use App\Cloud\Data\SensitiveRootCredential;
 use App\Cloud\Enums\ProviderErrorCategory;
 use App\Cloud\Enums\ProviderServerStatus;
 use App\Cloud\Exceptions\ProviderException;
@@ -21,6 +23,7 @@ use App\Enums\SettingKey;
 use App\Models\Order;
 use App\Models\Provider;
 use App\Models\ProvisioningAttempt;
+use App\Models\Server;
 use App\Orders\RefundService;
 use App\Provisioning\Data\ProvisioningPlan;
 use App\Provisioning\Data\ProvisioningResult;
@@ -80,6 +83,7 @@ final readonly class ProvisioningService
         private RefundService $refunds,
         private OperationalAlerts $alerts,
         private AuditRecorder $audit,
+        private CredentialRecovery $credentials,
     ) {}
 
     /**
@@ -256,7 +260,9 @@ final readonly class ProvisioningService
 
         if ($existing->isUnique()) {
             // The provider already built this. Recover it rather than create.
-            return $this->adoptRemote($order, $plan, $existing->sole(), ProvisioningOutcome::RecoveredExisting);
+            return $this->adoptRemote(
+                $order, $plan, $provider, $existing->sole(), ProvisioningOutcome::RecoveredExisting,
+            );
         }
 
         if ($existing->isTombstoned()) {
@@ -364,7 +370,7 @@ final readonly class ProvisioningService
         );
 
         try {
-            $remote = $provider->createServer($request);
+            $created = $provider->createServer($request);
         } catch (ProviderException $exception) {
             return $this->afterCreateFailure($order, $plan, $attempt, $exception);
         } catch (Throwable $exception) {
@@ -379,7 +385,7 @@ final readonly class ProvisioningService
             return $this->parkUncertain($order, 'The provider create did not complete cleanly.');
         }
 
-        return $this->afterCreate($order, $plan, $attempt, $remote);
+        return $this->afterCreate($order, $plan, $provider, $attempt, $created);
     }
 
     /**
@@ -388,9 +394,12 @@ final readonly class ProvisioningService
     private function afterCreate(
         Order $order,
         ProvisioningPlan $plan,
+        CloudProviderInterface $provider,
         ProvisioningAttempt $attempt,
-        ProviderServerData $remote,
+        ProviderCreateResult $created,
     ): ProvisioningResult {
+        $remote = $created->server;
+
         if ($remote->status === ProviderServerStatus::Deleted) {
             // The token's machine has already been removed. Create returned the
             // tombstone rather than building a replacement, which is the
@@ -429,6 +438,13 @@ final readonly class ProvisioningService
         if ($remote->status !== ProviderServerStatus::Active) {
             // Still being built. The machine exists, so nothing may be created
             // again; the order stays in provisioning and a sweep revisits it.
+            //
+            // The credential this response carried is dropped here, and that is
+            // deliberate. Keeping it would mean parking a plaintext secret
+            // somewhere durable until the machine is ready, which is the second
+            // secret store this design refuses to have. When the machine comes
+            // up, recovery rotates the password instead — safe, because nobody
+            // has been given the old one.
             $this->attempts->close(
                 $attempt, ProvisioningStage::Create, ProvisioningOutcome::InFlight, server: $remote,
             );
@@ -438,7 +454,9 @@ final readonly class ProvisioningService
             );
         }
 
-        return $this->persistCreated($order, $plan, $attempt, $remote, ProvisioningOutcome::Succeeded);
+        return $this->persistCreated(
+            $order, $plan, $attempt, $remote, ProvisioningOutcome::Succeeded, $created->rootCredential,
+        );
     }
 
     /**
@@ -450,9 +468,10 @@ final readonly class ProvisioningService
         ProvisioningAttempt $attempt,
         ProviderServerData $remote,
         ProvisioningOutcome $outcome,
+        ?SensitiveRootCredential $credential = null,
     ): ProvisioningResult {
         try {
-            $server = $this->persister->persist($order, $remote, $plan);
+            $server = $this->persister->persist($order, $remote, $plan, credential: $credential);
         } catch (RemoteIdentityMismatch|RemoteIdentityConflict $exception) {
             $this->attempts->close(
                 $attempt, ProvisioningStage::Persist, ProvisioningOutcome::IdentityMismatch, server: $remote,
@@ -505,6 +524,7 @@ final readonly class ProvisioningService
     private function adoptRemote(
         Order $order,
         ProvisioningPlan $plan,
+        CloudProviderInterface $provider,
         ?ProviderServerData $remote,
         ProvisioningOutcome $outcome,
     ): ProvisioningResult {
@@ -520,9 +540,65 @@ final readonly class ProvisioningService
             );
         }
 
+        // A machine this order already owns, found by its token rather than
+        // just created. Whatever password came back with the original create is
+        // long gone, so one is obtained now — before anything is delivered.
+        $credential = $this->credentialFor($order, $plan, $provider, $remote);
+
+        if ($credential instanceof ProvisioningResult) {
+            return $credential;
+        }
+
         $attempt = $this->attempts->open($order, ProvisioningStage::Persist, $plan);
 
-        return $this->persistCreated($order, $plan, $attempt, $remote, $outcome);
+        return $this->persistCreated($order, $plan, $attempt, $remote, $outcome, $credential);
+    }
+
+    /**
+     * A usable root password for a machine that exists but was never delivered.
+     *
+     * Returns a credential, or a result the caller must return unchanged. The
+     * machine is real and billable in every branch here, so none of them
+     * refunds and none of them creates anything.
+     */
+    private function credentialFor(
+        Order $order,
+        ProvisioningPlan $plan,
+        CloudProviderInterface $provider,
+        ProviderServerData $remote,
+    ): SensitiveRootCredential|ProvisioningResult|null {
+        // Already delivered by somebody else. Its credential is on file and
+        // rotating now would lock out a customer who has been given it.
+        if (Server::query()->where('order_id', $order->getKey())->exists()) {
+            return null;
+        }
+
+        $recovered = $this->credentials->recover($order, $plan, $provider, $remote->providerServerId);
+
+        if ($recovered instanceof SensitiveRootCredential) {
+            return $recovered;
+        }
+
+        if ($recovered === CredentialRecovery::Retryable) {
+            // Budget remains. Nothing is claimed and nobody is told; the next
+            // sweep tries again.
+            return ProvisioningResult::retryable(
+                $order,
+                ProvisioningOutcome::TransientFailure,
+                'A root credential for this server could not be issued yet.',
+            );
+        }
+
+        // Out of options. A machine exists, so no refund and no second create —
+        // and no delivery either, because handing over a server nobody can log
+        // into is worse than saying so.
+        return $this->parkNeedsAttention(
+            $order,
+            ProvisioningOutcome::Uncertain,
+            $recovered,
+            'The server exists but no usable root credential could be issued for it.',
+            ['provider_server_id' => $remote->providerServerId],
+        );
     }
 
     /**

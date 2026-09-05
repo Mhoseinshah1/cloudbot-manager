@@ -6,6 +6,7 @@ namespace App\Console\Commands;
 
 use App\Models\Order;
 use App\Provisioning\Data\ProvisioningResult;
+use App\Provisioning\PaidOrderRecovery;
 use App\Provisioning\ProvisioningDispatcher;
 use App\Provisioning\ReconciliationService;
 use Illuminate\Console\Command;
@@ -32,8 +33,11 @@ final class ReconcileProvisioningCommand extends Command
 
     protected $description = 'Resolve orders whose provisioning outcome is unknown, using their provisioning token';
 
-    public function handle(ReconciliationService $reconciliation, ProvisioningDispatcher $dispatcher): int
-    {
+    public function handle(
+        ReconciliationService $reconciliation,
+        ProvisioningDispatcher $dispatcher,
+        PaidOrderRecovery $recovery,
+    ): int {
         $one = $this->option('order');
 
         if ($one !== null && $one !== '') {
@@ -41,7 +45,31 @@ final class ReconcileProvisioningCommand extends Command
         }
 
         $limit = $this->option('limit');
-        $orders = $reconciliation->stuckOrders($limit === null || $limit === '' ? null : (int) $limit);
+        $limit = $limit === null || $limit === '' ? null : (int) $limit;
+
+        // Before the token sweep, and deliberately separate from it. These
+        // orders have no token at all, so nothing the reconciler does could
+        // ever find them: they were paid, their one provisioning delivery was
+        // lost or arrived while the switch was off, and the intent that
+        // dispatched it is already marked processed. Redispatch is the only
+        // thing that recovers them, and it is safe to repeat because a token
+        // is what makes one machine, not a job.
+        $recovered = $recovery->recover($limit);
+
+        if ($recovered === null) {
+            $this->error(
+                'provisioning.stuck_after_minutes is not set to a readable, non-negative integer, '
+                .'so paid orders with lost provisioning work cannot be selected automatically.'
+            );
+
+            return self::FAILURE;
+        }
+
+        if ($recovered > 0) {
+            $this->info("Requeued provisioning for {$recovered} paid order(s) whose work was lost.");
+        }
+
+        $orders = $reconciliation->stuckOrders($limit);
 
         if ($orders === null) {
             // Fail closed and say why. A sweep that silently did nothing is

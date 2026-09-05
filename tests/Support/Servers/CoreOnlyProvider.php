@@ -7,6 +7,7 @@ namespace Tests\Support\Servers;
 use App\Cloud\Contracts\CloudProviderInterface;
 use App\Cloud\Data\CreateServerRequest;
 use App\Cloud\Data\ProviderActionData;
+use App\Cloud\Data\ProviderCreateResult;
 use App\Cloud\Data\ProviderImageData;
 use App\Cloud\Data\ProviderLocationData;
 use App\Cloud\Data\ProviderPlanData;
@@ -74,7 +75,7 @@ final class CoreOnlyProvider implements CloudProviderInterface
         return $this->inner->checkAvailability($providerPlanId, $providerLocationId);
     }
 
-    public function createServer(CreateServerRequest $request): ProviderServerData
+    public function createServer(CreateServerRequest $request): ProviderCreateResult
     {
         return $this->inner->createServer($request);
     }

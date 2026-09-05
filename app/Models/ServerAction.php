@@ -37,6 +37,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * @property \Illuminate\Support\Carbon $requested_at
  * @property \Illuminate\Support\Carbon|null $settled_at
  * @property int $attempts
+ * @property \Illuminate\Support\Carbon|null $retry_after
  * @property-read Server $server
  */
 class ServerAction extends Model
@@ -82,6 +83,7 @@ class ServerAction extends Model
             'metadata' => 'array',
             'requested_at' => 'datetime',
             'settled_at' => 'datetime',
+            'retry_after' => 'datetime',
             'attempts' => 'integer',
         ];
     }
@@ -97,6 +99,19 @@ class ServerAction extends Model
     public function isOpen(): bool
     {
         return $this->status->isOpen();
+    }
+
+    /**
+     * Whether a worker may reach the provider for this action right now.
+     *
+     * The barrier is durable and per action, not per queue delivery. A job that
+     * was already waiting in Redis when a rate limit was written has to honour
+     * it too, and releasing the worker that received the refusal says nothing
+     * about that one.
+     */
+    public function mayAttemptNow(): bool
+    {
+        return $this->retry_after === null || ! $this->retry_after->isFuture();
     }
 
     public function isSettled(): bool

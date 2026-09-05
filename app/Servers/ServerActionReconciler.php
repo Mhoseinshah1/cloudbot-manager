@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Servers;
 
 use App\Enums\ServerActionStatus;
+use App\Jobs\ExecuteServerActionJob;
 use App\Models\Server;
 use App\Models\ServerAction;
 use Carbon\CarbonImmutable;
@@ -66,7 +67,9 @@ final readonly class ServerActionReconciler
             return false;
         }
 
-        $handled = $this->locks->attempt($server, function () use ($action, $server): bool {
+        $redispatch = false;
+
+        $handled = $this->locks->attempt($server, function () use ($action, $server, &$redispatch): bool {
             // Re-read holding the lock: what was true when the batch was
             // selected is not what is true now.
             $current = ServerAction::query()->whereKey($action->getKey())->first();
@@ -81,10 +84,22 @@ final readonly class ServerActionReconciler
                 return true;
             }
 
-            $this->executor->poll($current, $fresh);
+            $redispatch = $this->executor->poll($current, $fresh);
 
             return true;
         });
+
+        if ($handled === true && $redispatch) {
+            // Queued after the lock is released, never inside it. A job pushed
+            // from in here would immediately need the lock its own caller is
+            // still holding — which under a synchronous transport is a
+            // deadlock with itself, and under any transport is a wasted
+            // delivery racing the release.
+            //
+            // Same action row and same idempotency key: this is the work that
+            // was already promised, not a new request.
+            ExecuteServerActionJob::dispatch((int) $action->getKey());
+        }
 
         return $handled === true;
     }

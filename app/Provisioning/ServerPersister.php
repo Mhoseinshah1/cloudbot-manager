@@ -7,6 +7,7 @@ namespace App\Provisioning;
 use App\Audit\AuditEvent;
 use App\Audit\AuditRecorder;
 use App\Cloud\Data\ProviderServerData;
+use App\Cloud\Data\SensitiveRootCredential;
 use App\Enums\OrderStatus;
 use App\Enums\ServerPowerState;
 use App\Enums\ServerStatus;
@@ -23,6 +24,7 @@ use App\Provisioning\Exceptions\RemoteIdentityMismatch;
 use Carbon\CarbonImmutable;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
 use Illuminate\Support\Facades\DB;
+use SensitiveParameter;
 
 /**
  * Writes down that a customer has their server.
@@ -71,6 +73,17 @@ final readonly class ServerPersister
         ProviderServerData $remote,
         ProvisioningPlan $plan,
         ?CarbonImmutable $activatedAt = null,
+        /**
+         * The one-time root password, when the caller is holding one.
+         *
+         * Passed explicitly rather than read from the server DTO, because that
+         * DTO must never carry it. This is the only route from a create or
+         * reset response into durable storage, and it ends at the model's
+         * encrypted cast — nothing between here and there writes it anywhere
+         * else, and it is not part of the audit or outbox payload below.
+         */
+        #[SensitiveParameter]
+        ?SensitiveRootCredential $credential = null,
     ): Server {
         $activatedAt ??= CarbonImmutable::now();
 
@@ -78,7 +91,7 @@ final readonly class ServerPersister
         // roll back — it is a reason never to have started.
         $this->assertIdentityMatches($order, $remote, $plan);
 
-        return DB::transaction(function () use ($order, $remote, $plan, $activatedAt): Server {
+        return DB::transaction(function () use ($order, $remote, $plan, $activatedAt, $credential): Server {
             $locked = Order::query()->whereKey($order->getKey())->lockForUpdate()->first();
 
             if (! $locked instanceof Order) {
@@ -98,7 +111,7 @@ final readonly class ServerPersister
             // Somebody else's machine must not become this customer's.
             $this->assertRemoteUnclaimed($locked, $remote);
 
-            $server = $this->createServer($locked, $remote, $plan);
+            $server = $this->createServer($locked, $remote, $plan, $credential);
             $subscription = $this->createSubscription($locked, $server, $plan, $activatedAt);
 
             $provisioned = $this->markProvisioned($locked, $activatedAt);
@@ -139,8 +152,13 @@ final readonly class ServerPersister
         return 'provisioning:order:'.$order->getKey().':success';
     }
 
-    private function createServer(Order $order, ProviderServerData $remote, ProvisioningPlan $plan): Server
-    {
+    private function createServer(
+        Order $order,
+        ProviderServerData $remote,
+        ProvisioningPlan $plan,
+        #[SensitiveParameter]
+        ?SensitiveRootCredential $credential,
+    ): Server {
         $server = Server::query()->create([
             'user_id' => $order->user_id,
             'order_id' => $order->getKey(),
@@ -169,6 +187,11 @@ final readonly class ServerPersister
             'local_cost_toman' => $plan->localCostToman,
             'selling_price_toman' => $plan->sellingPriceToman,
             'gross_margin_toman' => $plan->grossMarginToman,
+            // Written inside the same transaction as the server it belongs to,
+            // through the model's encrypted cast. Null when this provider
+            // issues no password, and null is honest — it is what makes the
+            // reveal flow refuse rather than show an empty string.
+            'root_password_encrypted' => $credential?->reveal(),
         ]);
 
         $this->audit->record(
@@ -180,6 +203,10 @@ final readonly class ServerPersister
                 'user_id' => $order->user_id,
                 'provider_id' => $plan->providerId,
                 'provider_server_id' => $server->provider_server_id,
+                // Whether a credential was stored, never the credential. An
+                // operator needs to know a machine has a password on file; the
+                // password itself has exactly one home.
+                'has_root_credential' => $credential instanceof SensitiveRootCredential,
             ],
         );
 

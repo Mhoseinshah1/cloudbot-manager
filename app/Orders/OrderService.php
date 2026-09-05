@@ -81,22 +81,8 @@ final readonly class OrderService
             return $existing;
         }
 
-        // Only a genuinely new order is checked against today's conditions.
-        $this->assertCustomerMayBuy($intent->user);
-        $aupVersion = $this->requireAcceptedTerms($intent);
-
-        $quote = $this->pricing->quoteNewSale($intent->locationPrice);
-        $image = $this->requireSelectableImage($intent, $quote);
-        $selectionMode = $intent->imageSelectionMode();
-
-        // What the customer approved, against what it costs now. Only on this
-        // path: a retry carrying an existing key returned above without ever
-        // asking for a price, which is what stops "did my purchase work?" from
-        // being answered by today's rate.
-        $this->assertOfferUnchanged($intent, $quote, $image, $selectionMode, $aupVersion);
-
         try {
-            return DB::transaction(function () use ($intent, $quote, $image, $selectionMode, $aupVersion): Order {
+            return DB::transaction(function () use ($intent): Order {
                 // The customer's row, locked before the abuse limits are
                 // counted and held until this order exists. Two purchases
                 // racing for the last permitted slot queue here; counted
@@ -110,6 +96,42 @@ final readonly class OrderService
                 if (! $customer instanceof User) {
                     throw new ModelNotFoundException('The customer no longer exists.');
                 }
+
+                // Every mutable row that authorizes this sale, held until this
+                // order exists or does not. Reading them before the transaction
+                // was the defect: an administrator could switch sales off,
+                // replace the terms, reprice the catalog or withdraw the image
+                // in the gap between the read and the insert, and the order
+                // committed anyway, carrying authorization that had already
+                // been withdrawn.
+                //
+                // Re-reading inside the transaction is not enough on its own
+                // either — under read committed an administrator's commit still
+                // lands between our read and our insert. These are share locks,
+                // so the administrator's write waits for us and ours sees
+                // whatever they already committed. Concurrent purchases hold
+                // shared locks together and do not block each other.
+                $this->lockSaleControls($intent);
+
+                // Authoritative now, on rows nobody may change until we commit.
+                $this->assertCustomerMayBuy($customer);
+                $aupVersion = $this->requireAcceptedTerms($intent);
+
+                $quote = $this->pricing->quoteNewSale($intent->locationPrice);
+                $image = $this->requireSelectableImage($intent, $quote);
+                $selectionMode = $intent->imageSelectionMode();
+
+                // The image is resolved by the quote, so it is locked here
+                // rather than above — the same rule, one step later in the
+                // documented order.
+                $this->lockImage((int) $image->getKey());
+                $image = $this->requireSelectableImage($intent, $quote);
+
+                // What the customer approved, against what it costs now. Only
+                // on this path: a retry carrying an existing key returned
+                // above without ever asking for a price, which is what stops
+                // "did my purchase work?" from being answered by today's rate.
+                $this->assertOfferUnchanged($intent, $quote, $image, $selectionMode, $aupVersion);
 
                 $this->policy->assertMayPurchase($customer);
 
@@ -159,6 +181,71 @@ final readonly class OrderService
 
             throw $exception;
         }
+    }
+
+    /**
+     * Share-lock every mutable row that authorizes a new sale.
+     *
+     * A documented, fixed order, because a lock order that varies is a deadlock
+     * waiting for load: settings, then the location price, then the product,
+     * then the provider, plan and location behind it. The image comes after,
+     * once the quote has resolved which one this order would be built from.
+     *
+     * Share rather than exclusive, deliberately. Two customers buying at once
+     * hold these together and never wait on each other; only an administrator
+     * changing one of them waits, which is exactly the interleaving that used
+     * to let a withdrawn authorization commit an order anyway.
+     *
+     * Nothing is locked that a sale does not depend on, and no lock is taken
+     * before the customer's own row, which stays the first lock in the system's
+     * global order.
+     */
+    private function lockSaleControls(PurchaseIntent $intent): void
+    {
+        // Ordered by key, so two callers take them in the same sequence.
+        $keys = [
+            SettingKey::AupCurrentVersion->value,
+            SettingKey::FxMaxAgeMinutes->value,
+            SettingKey::SalesEnabled->value,
+        ];
+        sort($keys);
+
+        DB::table('settings')->whereIn('key', $keys)->orderBy('key')->sharedLock()->get();
+
+        $price = DB::table('product_location_prices')
+            ->where('id', $intent->locationPrice->getKey())
+            ->sharedLock()
+            ->first();
+
+        if ($price === null) {
+            // Gone since the customer chose it. The quote below refuses it with
+            // the reason a customer can be shown; nothing to lock here.
+            return;
+        }
+
+        $product = DB::table('products')
+            ->where('id', $price->product_id)
+            ->sharedLock()
+            ->first();
+
+        if ($product === null) {
+            return;
+        }
+
+        DB::table('providers')->where('id', $product->provider_id)->sharedLock()->get();
+        DB::table('provider_plans')->where('id', $product->provider_plan_id)->sharedLock()->get();
+        DB::table('provider_locations')->where('id', $price->provider_location_id)->sharedLock()->get();
+    }
+
+    /**
+     * Share-lock the image this order would actually be built from.
+     *
+     * Last in the documented order, because which image that is only becomes
+     * known once the quote has resolved the location's default.
+     */
+    private function lockImage(int $imageId): void
+    {
+        DB::table('provider_images')->where('id', $imageId)->sharedLock()->get();
     }
 
     /**
@@ -300,6 +387,73 @@ final readonly class OrderService
 
             return $paid;
         });
+    }
+
+    /**
+     * Carry one purchase intent to a funded order, from wherever it stopped.
+     *
+     * The three durable steps behind a purchase — create, ask for payment,
+     * take payment — commit separately, because each is its own transaction and
+     * no two of them can be made one. A worker can die between any pair, and
+     * the same Telegram update, the same queued job or the same impatient
+     * customer then arrives again carrying the identical intent.
+     *
+     * Replaying that intent by repeating the steps does not work. `place()`
+     * correctly returns the order it already made, and calling `awaitPayment()`
+     * on it then asks the state machine for a move it does not have — pending is
+     * the only status that transition accepts. So an order that was created and
+     * never asked for payment gets stranded, and one that was already paid
+     * throws instead of acknowledging a purchase that succeeded.
+     *
+     * This reads the order as it actually stands and performs only the step
+     * that is missing:
+     *
+     *   pending          -> ask for payment, then pay
+     *   awaiting_payment -> pay
+     *   funded           -> nothing; the money already moved, the invoice
+     *                       exists, and the provisioning intent is written
+     *   anything else    -> refused, because it cannot be paid for
+     *
+     * Every guarantee still comes from the layer underneath: one debit per
+     * order idempotency key, one invoice, one provisioning outbox row. This
+     * removes the case where a resumable purchase was never resumed at all.
+     *
+     * @throws OrderNotPlaceable
+     */
+    public function settleFromWallet(Order $order, User $payer): Order
+    {
+        // Read fresh. The instance the caller holds was loaded before whatever
+        // crash is being recovered from, and its status is exactly the fact
+        // that changed.
+        $fresh = Order::query()->whereKey($order->getKey())->first();
+
+        if (! $fresh instanceof Order) {
+            throw new ModelNotFoundException('That order no longer exists.');
+        }
+
+        $this->assertOwner($fresh, $payer);
+
+        if ($fresh->status->isFunded()) {
+            // The customer's funds are already committed to this order. Paying
+            // again would be a second debit for one purchase, and asking for
+            // payment again would move a paid order backwards.
+            return $fresh;
+        }
+
+        if ($fresh->status === OrderStatus::Pending) {
+            $fresh = $this->awaitPayment($fresh);
+        }
+
+        if ($fresh->status !== OrderStatus::AwaitingPayment) {
+            // Expired, cancelled or refunded. A purchase intent does not revive
+            // an order the business has already closed.
+            throw OrderNotPlaceable::because(
+                OrderRefusalReason::NotPayable,
+                "An order in {$fresh->status->value} cannot be paid.",
+            );
+        }
+
+        return $this->payFromWallet($fresh, $payer);
     }
 
     /**

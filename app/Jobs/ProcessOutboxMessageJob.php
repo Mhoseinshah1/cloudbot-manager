@@ -155,6 +155,18 @@ final class ProcessOutboxMessageJob implements ShouldQueue
             // an operator who configures the channel tomorrow has to find the
             // alert still waiting rather than already given up on.
             $dispatcher->defer($message, $disposition->deferSeconds);
+
+            return;
+        }
+
+        if ($disposition->isPostponed()) {
+            // A configured destination refused the request. The row stays
+            // unprocessed so fixing the destination still delivers the alert,
+            // and the not-before time is written to PostgreSQL rather than only
+            // released on this worker — a duplicate already sitting in the
+            // queue would otherwise call Telegram again immediately. The
+            // attempt stays spent, because one genuinely was.
+            $dispatcher->postpone($message, $disposition->deferSeconds);
         }
     }
 

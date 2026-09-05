@@ -83,6 +83,19 @@ return [
     */
 
     'provisioning' => [
+        // How many times an order may ask a provider for a fresh root password
+        // after its create-time credential was lost before delivery. Its own
+        // bound, and emphatically not the create budget: rotating a password
+        // makes no second machine, so a run of reset failures must not retire
+        // an order whose server is sitting there working.
+        'credential_recovery_max_attempts' => (int) env('CREDENTIAL_RECOVERY_MAX_ATTEMPTS', 3),
+
+        // How long one recovery execution waits for an asynchronous reset to
+        // finish. Bounded and short: the credential is held only in memory, so
+        // waiting longer means holding a secret longer, and a window that
+        // closes simply means the next recovery rotates again.
+        'credential_recovery_poll_seconds' => (int) env('CREDENTIAL_RECOVERY_POLL_SECONDS', 10),
+
         'provider_timeout_seconds' => (int) env('PROVIDER_OPERATION_TIMEOUT_SECONDS', 120),
         'lock_ttl_seconds' => (int) env('PROVISIONING_LOCK_TTL_SECONDS', 300),
 
@@ -118,6 +131,14 @@ return [
         // provider what happened to it.
         'reconcile_after_seconds' => 60,
         'reconcile_batch' => 100,
+
+        // How long to hold a retryable provider refusal — a rate limit, a
+        // short outage, a transient error — before another attempt is allowed.
+        // Durable, on the action row, so a job that was already queued when the
+        // refusal arrived honours it too. The typed provider contract carries a
+        // category but no retry-after time, so this is the policy rather than
+        // something a provider told us.
+        'retry_after_seconds' => (int) env('SERVER_ACTION_RETRY_AFTER_SECONDS', 120),
     ],
 
     /*

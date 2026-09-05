@@ -4,17 +4,21 @@ declare(strict_types=1);
 
 namespace App\Cloud\Fake;
 
+use App\Cloud\Capabilities\SupportsPasswordReset;
 use App\Cloud\Capabilities\SupportsPowerControl;
 use App\Cloud\Capabilities\SupportsReboot;
 use App\Cloud\Contracts\CloudProviderInterface;
 use App\Cloud\Data\CreateServerRequest;
 use App\Cloud\Data\ProviderActionData;
+use App\Cloud\Data\ProviderCreateResult;
 use App\Cloud\Data\ProviderImageData;
 use App\Cloud\Data\ProviderLocationData;
+use App\Cloud\Data\ProviderPasswordResetData;
 use App\Cloud\Data\ProviderPlanData;
 use App\Cloud\Data\ProviderPricingData;
 use App\Cloud\Data\ProviderServerData;
 use App\Cloud\Data\SafeMetadata;
+use App\Cloud\Data\SensitiveRootCredential;
 use App\Cloud\Enums\ProviderActionStatus;
 use App\Cloud\Enums\ProviderErrorCategory;
 use App\Cloud\Enums\ProviderPowerState;
@@ -40,7 +44,7 @@ use Illuminate\Support\Str;
  * class, a queue worker and a web request all see the same simulated provider,
  * and it survives the process restarting — as a real provider obviously would.
  */
-final class FakeProvider implements CloudProviderInterface, SupportsPowerControl, SupportsReboot
+final class FakeProvider implements CloudProviderInterface, SupportsPasswordReset, SupportsPowerControl, SupportsReboot
 {
     public const CODE = 'fake';
 
@@ -106,7 +110,7 @@ final class FakeProvider implements CloudProviderInterface, SupportsPowerControl
      * remote resource for good, so this method can create at most one server
      * per token over the whole life of the system.
      */
-    public function createServer(CreateServerRequest $request): ProviderServerData
+    public function createServer(CreateServerRequest $request): ProviderCreateResult
     {
         $existing = $this->findByProvisioningToken($request->provisioningToken);
 
@@ -116,7 +120,12 @@ final class FakeProvider implements CloudProviderInterface, SupportsPowerControl
             // server that already exists, and a token that has already produced
             // a server must never produce a second one — the caller learns the
             // outcome from the status rather than receiving a replacement.
-            return $existing;
+            //
+            // And with no credential. A one-time password is issued once; a
+            // provider replaying an earlier result has none left to give, and
+            // pretending otherwise would let a caller believe a credential it
+            // never received is safely in hand.
+            return ProviderCreateResult::withoutCredential($existing);
         }
 
         $this->guardCatalog($request);
@@ -131,6 +140,11 @@ final class FakeProvider implements CloudProviderInterface, SupportsPowerControl
 
         $serverId = (string) Str::ulid();
 
+        // Issued once, on creation, exactly as a password-authenticating
+        // provider does. Generated at runtime — nothing credential-shaped is
+        // ever written into this repository.
+        $password = self::issuePassword();
+
         try {
             // Wrapped in its own transaction so a duplicate key rolls back to a
             // savepoint rather than poisoning the caller's transaction.
@@ -144,6 +158,7 @@ final class FakeProvider implements CloudProviderInterface, SupportsPowerControl
                 'provider_plan_id' => $request->providerPlanId,
                 'provider_location_id' => $request->providerLocationId,
                 'provider_image_id' => $request->providerImageId,
+                'root_password_verifier' => self::verifier($password),
                 'status' => ProviderServerStatus::Active,
                 'power_state' => ProviderPowerState::On,
                 'ipv4' => $this->syntheticIpv4($serverId),
@@ -156,7 +171,9 @@ final class FakeProvider implements CloudProviderInterface, SupportsPowerControl
             $winner = $this->findByProvisioningToken($request->provisioningToken);
 
             if ($winner instanceof ProviderServerData) {
-                return $winner;
+                // The losing side of the token race. The winner issued the
+                // password, and this caller never held it.
+                return ProviderCreateResult::withoutCredential($winner);
             }
 
             throw ProviderException::make(
@@ -167,7 +184,101 @@ final class FakeProvider implements CloudProviderInterface, SupportsPowerControl
             );
         }
 
-        return $this->toServerData($server);
+        // The one and only moment this provider hands a credential over.
+        return new ProviderCreateResult(
+            $this->toServerData($server),
+            new SensitiveRootCredential($password),
+        );
+    }
+
+    /**
+     * Issue a new root password for a server this provider already runs.
+     *
+     * The old password stops working, exactly as a real provider's reset does.
+     * That is what makes it safe for pre-delivery recovery and unsafe for
+     * anything else: rotating a credential nobody holds costs nothing, and
+     * rotating one a customer is using locks them out.
+     */
+    public function resetRootPassword(string $providerServerId): ProviderPasswordResetData
+    {
+        $server = $this->findServerOrFail($providerServerId);
+
+        if ($server->status === ProviderServerStatus::Deleted) {
+            throw ProviderException::invalidRequest(
+                self::CODE,
+                'That server has been deleted.',
+                ['server' => $providerServerId],
+            );
+        }
+
+        $password = self::issuePassword();
+
+        $server->forceFill(['root_password_verifier' => self::verifier($password)])->save();
+
+        $action = $this->recordAction('reset_password', $providerServerId);
+
+        return new ProviderPasswordResetData(
+            providerActionId: $action->providerActionId,
+            providerServerId: $providerServerId,
+            status: $action->status,
+            rootCredential: new SensitiveRootCredential($password),
+            // Never the password. This is the surface everything else reads.
+            metadata: SafeMetadata::pick(['command' => 'reset_password'], ['command']),
+        );
+    }
+
+    /**
+     * Whether this credential is the one this server currently accepts.
+     *
+     * The simulator's equivalent of trying to log in, and the only way anything
+     * can learn what password this provider holds: by presenting one and being
+     * told yes or no. There is deliberately no method that hands the plaintext
+     * back, because the provider does not keep it — only a digest of it.
+     *
+     * A rotation therefore makes the previous credential stop matching, which
+     * is exactly what a real reset does and what a plaintext column could only
+     * pretend to model.
+     */
+    public function credentialMatches(string $providerServerId, SensitiveRootCredential|string $credential): bool
+    {
+        $stored = FakeProviderServer::query()
+            ->where('provider_server_id', $providerServerId)
+            ->value('root_password_verifier');
+
+        if (! is_string($stored) || $stored === '') {
+            return false;
+        }
+
+        $plaintext = $credential instanceof SensitiveRootCredential ? $credential->reveal() : $credential;
+
+        // Constant time, because comparing digests with === is the habit that
+        // eventually gets copied somewhere it matters.
+        return hash_equals($stored, self::verifier($plaintext));
+    }
+
+    /**
+     * A password this simulator issues, generated per call.
+     *
+     * Random rather than derived, so no test can pass by predicting it, and
+     * runtime-only, so no credential-shaped literal is committed.
+     */
+    private static function issuePassword(): string
+    {
+        return 'fpw-'.bin2hex(random_bytes(16));
+    }
+
+    /**
+     * The one-way value this provider keeps instead of a password.
+     *
+     * SHA-256 without a salt or a slow KDF, deliberately. The input is 128 bits
+     * of `random_bytes`, so there is no guessing, dictionary or rainbow-table
+     * exposure for a work factor to defend against — and a deliberately slow
+     * hash would cost every test in the suite for security this value does not
+     * need. What matters here is only that it is irreversible.
+     */
+    private static function verifier(string $plaintext): string
+    {
+        return hash('sha256', $plaintext);
     }
 
     /**

@@ -199,15 +199,35 @@ final readonly class NotificationService
             // emphatically not a customer who blocked the bot — there is no
             // TelegramAccount here to mark, and inventing one would attribute
             // an alert channel to a person.
-            return DeliveryOutcome::settled($this->record(
-                null,
-                NotificationChannel::TelegramAdmin,
-                $type,
-                NotificationStatus::Failed,
-                $summary,
-                $outboxMessageId,
-                $deduplicationKey,
-            ));
+            //
+            // So it is not settled either. A customer's 403 is a decision they
+            // made and retrying it forever is arguing with somebody who left;
+            // an admin channel's 403 is a permission somebody will fix, and the
+            // alert waiting behind it — a failed provisioning, an inventory
+            // discrepancy — is the exact message that must still arrive when
+            // they do. Marking it done here discards it permanently.
+            //
+            // The attempt stays spent: a request was made and was refused. That
+            // is the difference from a missing destination, where nothing left
+            // the building and the attempt is handed back. The finite budget
+            // and the bounded delay together stop this becoming a hot loop
+            // around a channel that will never accept anything.
+            return DeliveryOutcome::refused(
+                $this->record(
+                    null,
+                    NotificationChannel::TelegramAdmin,
+                    $type,
+                    NotificationStatus::Failed,
+                    $summary,
+                    $outboxMessageId,
+                    // The key is kept. A failed row does not occupy the
+                    // successful-delivery slot — the unique index covers sent
+                    // rows only — so the attempt stays tied to the intent it
+                    // belongs to and the later success still records cleanly.
+                    $deduplicationKey,
+                ),
+                $this->deferSeconds(),
+            );
         }
 
         return DeliveryOutcome::settled($this->record(
