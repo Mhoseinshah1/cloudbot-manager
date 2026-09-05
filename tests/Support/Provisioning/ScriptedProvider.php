@@ -226,7 +226,7 @@ final class ScriptedProvider implements CloudProviderInterface, SupportsPowerCon
         return $server;
     }
 
-    public function getServer(string $providerServerId): ProviderServerData
+    public function getServer(string $providerServerId): ?ProviderServerData
     {
         $this->intercept('getServer');
 

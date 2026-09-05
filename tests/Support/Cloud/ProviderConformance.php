@@ -14,7 +14,6 @@ use App\Cloud\Data\ProviderPricingData;
 use App\Cloud\Data\ProviderServerData;
 use App\Cloud\Enums\ProviderCapability;
 use App\Cloud\Enums\ProviderServerStatus;
-use App\Cloud\Exceptions\ProviderException;
 use App\Support\Secrets\SecretScrubber;
 use Closure;
 use Illuminate\Support\Str;
@@ -212,16 +211,28 @@ final class ProviderConformance
                 expect($ids)->toContain($created->providerServerId);
             });
 
-            it('raises a normalized failure for an unknown server', function () use ($resolve): void {
-                try {
-                    $resolve()->getServer('definitely-not-a-server');
-                    expect(false)->toBeTrue('expected a ProviderException');
-                } catch (ProviderException $exception) {
-                    // A category, not a status code or prose, is what business
-                    // code is allowed to branch on.
-                    expect($exception->category->value)->toBeString()
-                        ->and($exception->providerCode)->toBe($resolve()->code());
-                }
+            it('answers absence for an unknown server rather than refusing', function () use ($resolve): void {
+                // Null is the contract's only way of saying "there is no such
+                // server", and it has to be an answer rather than a failure:
+                // absence ends a customer's service, so it must never be
+                // something business code infers from an error that happens to
+                // look like one.
+                expect($resolve()->getServer('definitely-not-a-server'))->toBeNull();
+            });
+
+            it('keeps absence and a failed lookup apart', function () use ($resolve, $fixtures, $request): void {
+                // The distinction this whole return type exists for. A server
+                // that is really there answers with its state; one that was
+                // never there answers null; and neither is reachable by any
+                // exception, which is what stops a rejected credential or a
+                // timeout being read as "the customer's machine is gone".
+                $created = $resolve()->createServer($request($fixtures));
+
+                $present = $resolve()->getServer($created->providerServerId);
+
+                expect($present)->toBeInstanceOf(ProviderServerData::class)
+                    ->and($present->providerServerId)->toBe($created->providerServerId)
+                    ->and($resolve()->getServer($created->providerServerId.'-not-real'))->toBeNull();
             });
 
             it('deletes a server and stops listing it', function () use ($resolve, $fixtures, $request): void {
@@ -238,6 +249,21 @@ final class ProviderConformance
                 );
 
                 expect($ids)->not->toContain($created->providerServerId);
+            });
+
+            it('still answers for a deleted server, rather than reporting absence', function () use ($resolve, $fixtures, $request): void {
+                // A tombstone and an identity that never existed are different
+                // facts, and reconciliation needs both: one says what became of
+                // a machine we sold, the other says we are asking about
+                // something that was never real.
+                $created = $resolve()->createServer($request($fixtures));
+
+                $resolve()->deleteServer($created->providerServerId);
+
+                $after = $resolve()->getServer($created->providerServerId);
+
+                expect($after)->toBeInstanceOf(ProviderServerData::class)
+                    ->and($after->status->exists())->toBeFalse();
             });
 
             it('creates no replacement when a token is retried after deletion', function () use ($resolve, $fixtures, $request): void {

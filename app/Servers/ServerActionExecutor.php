@@ -305,18 +305,24 @@ final readonly class ServerActionExecutor
         try {
             $remote = $provider->getServer($server->provider_server_id);
         } catch (ProviderException $exception) {
-            if ($action->action === ServerActionType::Delete && $this->meansGone($exception)) {
-                // The machine is not there. For a delete that is the answer.
-                $this->termination->finalize($action);
-
-                return true;
-            }
+            // The lookup failed. That says nothing about whether the machine
+            // is there — an invalid request, a rejected credential, a timeout
+            // and a rate limit all happen while a customer's server is running
+            // perfectly well. Nothing is settled and nothing is claimed.
+            Log::info('server_action.lookup_failed', [
+                'server_action_id' => $action->getKey(),
+                'category' => $exception->category->value,
+            ]);
 
             return false;
         }
 
         if ($action->action === ServerActionType::Delete) {
-            if ($remote->status === ProviderServerStatus::Deleted) {
+            // Two answers end a deletion, and only these two: the provider says
+            // the machine is deleted, or the provider says there is no such
+            // machine. Both are the provider affirmatively answering the
+            // question; neither is a failure that resembles one.
+            if ($remote === null || $remote->status === ProviderServerStatus::Deleted) {
                 $this->termination->finalize($action);
 
                 return true;
@@ -324,6 +330,14 @@ final readonly class ServerActionExecutor
 
             // Still running. Nothing is settled and nothing is claimed; the
             // action stays open for another bounded attempt.
+            return false;
+        }
+
+        if ($remote === null) {
+            // The machine this action targets is gone, so powering or
+            // rebooting it will never succeed. Not settled here: a server that
+            // has vanished from under a live local record is inventory drift,
+            // and the sweep whose job that is owns the correction.
             return false;
         }
 
@@ -344,16 +358,6 @@ final readonly class ServerActionExecutor
         $this->succeed($action, $server, null);
 
         return true;
-    }
-
-    /**
-     * Whether a provider's refusal means the machine no longer exists.
-     *
-     * Read from the normalized category, never from the message.
-     */
-    private function meansGone(ProviderException $exception): bool
-    {
-        return $exception->category === ProviderErrorCategory::InvalidRequest;
     }
 
     private function perform(

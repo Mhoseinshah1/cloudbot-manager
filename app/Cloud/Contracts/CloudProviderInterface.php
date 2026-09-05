@@ -88,9 +88,28 @@ interface CloudProviderInterface
     public function createServer(CreateServerRequest $request): ProviderServerData;
 
     /**
-     * @throws ProviderException When no such server exists.
+     * Read one server, or establish that it is not there.
+     *
+     * This is the only way anything in this system may conclude that a remote
+     * server does not exist, and the return type is what makes that conclusion
+     * unmistakable:
+     *
+     *  - a ProviderServerData is the server's confirmed state;
+     *  - null is confirmed absence — the provider was reached, understood the
+     *    question, and answered that no such server exists;
+     *  - a ProviderException means the lookup itself failed, and says nothing
+     *    at all about whether the server is there.
+     *
+     * The distinction is load-bearing. Absence ends a customer's service and
+     * closes their subscription, so it must never be inferred from a failure
+     * that merely looks like one — an invalid request, a rejected credential,
+     * a timeout or a rate limit are all things that happen while a customer's
+     * machine is running perfectly well. An adapter maps its provider's own
+     * "no such resource" answer to null and everything else to an exception.
+     *
+     * @throws ProviderException When the lookup could not be completed.
      */
-    public function getServer(string $providerServerId): ProviderServerData;
+    public function getServer(string $providerServerId): ?ProviderServerData;
 
     /**
      * Every server this account currently has at the provider.

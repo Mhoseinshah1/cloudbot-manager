@@ -40,10 +40,12 @@ final readonly class OutboxRouter
     /**
      * Act on one message.
      *
-     * @return bool Whether this message is now finished with. False leaves the
-     *              row unprocessed, so the next sweep sees it again.
+     * Returns how the intent stands afterwards. Finished means the row may be
+     * marked processed; anything else leaves it unprocessed so a later sweep
+     * sees it again, with a deferral where retrying immediately would be a hot
+     * loop around something only a person can fix.
      */
-    public function route(OutboxMessage $message): bool
+    public function route(OutboxMessage $message): OutboxDisposition
     {
         return match ($message->topic) {
             OutboxTopic::ProvisioningRequested => $this->provisionOrder($message),
@@ -66,17 +68,17 @@ final readonly class OutboxRouter
      * before recording, and that is safe — one durable token yields one remote
      * machine however many jobs arrive.
      */
-    private function provisionOrder(OutboxMessage $message): bool
+    private function provisionOrder(OutboxMessage $message): OutboxDisposition
     {
         $order = $this->orderFor($message);
 
         if (! $order instanceof Order) {
-            return true;
+            return OutboxDisposition::finished();
         }
 
         ProvisionOrderJob::dispatch((int) $order->getKey());
 
-        return true;
+        return OutboxDisposition::finished();
     }
 
     /**
@@ -85,42 +87,42 @@ final readonly class OutboxRouter
      * Also no message. The action row already exists; this is what gets it onto
      * the worker that is allowed to call a provider.
      */
-    private function executeServerAction(OutboxMessage $message): bool
+    private function executeServerAction(OutboxMessage $message): OutboxDisposition
     {
         $actionId = $this->intFrom($message, 'server_action_id');
 
         if ($actionId === null) {
-            return true;
+            return OutboxDisposition::finished();
         }
 
         $action = ServerAction::query()->whereKey($actionId)->first();
 
         if (! $action instanceof ServerAction) {
-            return true;
+            return OutboxDisposition::finished();
         }
 
         if (! $action->isOpen()) {
             // Already settled, by a reconciler or an earlier delivery.
-            return true;
+            return OutboxDisposition::finished();
         }
 
         ExecuteServerActionJob::dispatch((int) $action->getKey());
 
-        return true;
+        return OutboxDisposition::finished();
     }
 
-    private function provisioningSucceeded(OutboxMessage $message): bool
+    private function provisioningSucceeded(OutboxMessage $message): OutboxDisposition
     {
         $order = $this->orderFor($message);
 
         if (! $order instanceof Order) {
-            return true;
+            return OutboxDisposition::finished();
         }
 
         $customer = User::query()->whereKey($order->user_id)->first();
 
         if (! $customer instanceof User) {
-            return true;
+            return OutboxDisposition::finished();
         }
 
         // Loaded now, not read out of the payload. The server's address may
@@ -135,7 +137,7 @@ final readonly class OutboxRouter
             'current_period_end' => $server?->subscription?->current_period_end?->toDateString(),
         ];
 
-        $this->notifications->toCustomer(
+        $outcome = $this->notifications->toCustomer(
             $customer,
             OutboxTopic::ProvisioningSucceeded,
             CustomerMessages::provisioningSucceeded($facts),
@@ -144,24 +146,24 @@ final readonly class OutboxRouter
             self::deliveryKey($message),
         );
 
-        return true;
+        return OutboxDisposition::from($outcome);
     }
 
-    private function orderRefunded(OutboxMessage $message): bool
+    private function orderRefunded(OutboxMessage $message): OutboxDisposition
     {
         $order = $this->orderFor($message);
 
         if (! $order instanceof Order) {
-            return true;
+            return OutboxDisposition::finished();
         }
 
         $customer = User::query()->whereKey($order->user_id)->first();
 
         if (! $customer instanceof User) {
-            return true;
+            return OutboxDisposition::finished();
         }
 
-        $this->notifications->toCustomer(
+        $outcome = $this->notifications->toCustomer(
             $customer,
             OutboxTopic::OrderRefunded,
             CustomerMessages::orderRefunded([
@@ -173,25 +175,25 @@ final readonly class OutboxRouter
             self::deliveryKey($message),
         );
 
-        return true;
+        return OutboxDisposition::from($outcome);
     }
 
-    private function serverTerminated(OutboxMessage $message): bool
+    private function serverTerminated(OutboxMessage $message): OutboxDisposition
     {
         $serverId = $this->intFrom($message, 'server_id');
         $server = $serverId === null ? null : Server::query()->whereKey($serverId)->first();
 
         if (! $server instanceof Server) {
-            return true;
+            return OutboxDisposition::finished();
         }
 
         $customer = User::query()->whereKey($server->user_id)->first();
 
         if (! $customer instanceof User) {
-            return true;
+            return OutboxDisposition::finished();
         }
 
-        $this->notifications->toCustomer(
+        $outcome = $this->notifications->toCustomer(
             $customer,
             OutboxTopic::ServerTerminated,
             CustomerMessages::serverTerminated(['server_name' => $server->name]),
@@ -200,7 +202,7 @@ final readonly class OutboxRouter
             self::deliveryKey($message),
         );
 
-        return true;
+        return OutboxDisposition::from($outcome);
     }
 
     /**
@@ -211,7 +213,7 @@ final readonly class OutboxRouter
      * credentials — so none of it is copied into an alert, however useful it
      * would be to read.
      */
-    private function operationalAlert(OutboxMessage $message): bool
+    private function operationalAlert(OutboxMessage $message): OutboxDisposition
     {
         $summary = $this->safeSummary($message);
 
@@ -221,7 +223,7 @@ final readonly class OutboxRouter
             $lines[] = $key.': '.$value;
         }
 
-        $this->notifications->toAdministrators(
+        $outcome = $this->notifications->toAdministrators(
             $message->topic,
             implode("\n", $lines),
             $summary,
@@ -229,7 +231,7 @@ final readonly class OutboxRouter
             self::deliveryKey($message),
         );
 
-        return true;
+        return OutboxDisposition::from($outcome);
     }
 
     /**
@@ -239,14 +241,14 @@ final readonly class OutboxRouter
      * somebody can answer; one that was marked done is a message that silently
      * never arrived.
      */
-    private function unknown(OutboxMessage $message): bool
+    private function unknown(OutboxMessage $message): OutboxDisposition
     {
         Log::warning('outbox.unknown_topic', [
             'outbox_message_id' => $message->getKey(),
             'topic' => $message->topic,
         ]);
 
-        return false;
+        return OutboxDisposition::unhandled();
     }
 
     /** One delivery per intent per channel, however many workers arrive. */

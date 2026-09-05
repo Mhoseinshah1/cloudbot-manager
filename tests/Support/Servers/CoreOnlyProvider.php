@@ -79,7 +79,7 @@ final class CoreOnlyProvider implements CloudProviderInterface
         return $this->inner->createServer($request);
     }
 
-    public function getServer(string $providerServerId): ProviderServerData
+    public function getServer(string $providerServerId): ?ProviderServerData
     {
         return $this->inner->getServer($providerServerId);
     }

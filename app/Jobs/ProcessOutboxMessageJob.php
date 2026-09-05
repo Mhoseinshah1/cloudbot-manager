@@ -110,7 +110,7 @@ final class ProcessOutboxMessageJob implements ShouldQueue
         }
 
         try {
-            $finished = $router->route($message);
+            $disposition = $router->route($message);
         } catch (TelegramRateLimited $limited) {
             // Telegram asked us to wait. Released for exactly that long, and
             // emphatically not marked processed: the message has not been sent.
@@ -119,8 +119,19 @@ final class ProcessOutboxMessageJob implements ShouldQueue
             return;
         }
 
-        if ($finished) {
+        if ($disposition->finished) {
             $dispatcher->markProcessed($message);
+
+            return;
+        }
+
+        if ($disposition->isDeferred()) {
+            // Nothing was delivered and nothing was refused: the destination is
+            // simply not configured yet. The attempt is handed back, because a
+            // configuration gap must not consume the finite delivery budget —
+            // an operator who configures the channel tomorrow has to find the
+            // alert still waiting rather than already given up on.
+            $dispatcher->defer($message, $disposition->deferSeconds);
         }
     }
 

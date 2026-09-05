@@ -32,6 +32,21 @@ use Illuminate\Database\QueryException;
  * forever would be arguing with somebody who left. Being rate limited is
  * temporary, and the job is released for exactly as long as Telegram asked
  * rather than marked delivered.
+ *
+ * Nothing is sent without first asking whether it already was. A delivery
+ * carrying a durable key looks for a terminal record of itself before it opens
+ * a connection, because the alternative is a real duplicate: Telegram accepts
+ * the message, the log row commits, the process dies before the outbox is
+ * marked, the sweep offers the intent again — and a unique index discovered
+ * only *after* the second send tells the customer nothing useful, having
+ * already messaged them twice.
+ *
+ * This is not exactly-once and does not claim to be. A worker that dies after
+ * Telegram accepted a message and before any local record commits leaves no
+ * evidence at all, and the retry sends again. That window is unavoidable: no
+ * database write commits atomically with a network send. What is removed here
+ * is the avoidable case, where durable evidence of the completed delivery
+ * already exists and was simply never consulted.
  */
 final readonly class NotificationService
 {
@@ -56,13 +71,40 @@ final readonly class NotificationService
         array $summary = [],
         ?int $outboxMessageId = null,
         ?string $deduplicationKey = null,
-    ): NotificationLog {
-        $chatId = $this->chatFor($customer);
+    ): DeliveryOutcome {
+        // Asked before anything is opened. A terminal record means this exact
+        // delivery already reached its conclusion, and repeating it would put a
+        // second copy in front of a person.
+        $already = $this->terminalDelivery($deduplicationKey);
+
+        if ($already instanceof NotificationLog) {
+            return DeliveryOutcome::settled($already);
+        }
+
+        $account = $this->accountFor($customer);
+
+        if ($account instanceof TelegramAccount && $account->hasBlockedBot()) {
+            // They blocked the bot, and Phase 8 recorded it. Sending anyway
+            // would be arguing with somebody who left — and Telegram would
+            // refuse it, which is a request made only to be told what we
+            // already know.
+            return DeliveryOutcome::settled($this->record(
+                $customer,
+                NotificationChannel::TelegramCustomer,
+                $type,
+                NotificationStatus::Blocked,
+                $summary,
+                $outboxMessageId,
+                $deduplicationKey,
+            ));
+        }
+
+        $chatId = $account instanceof TelegramAccount ? $account->telegram_chat_id : null;
 
         if ($chatId === null) {
             // Nobody to send to. Not a failure to retry: a customer with no
             // private chat has never spoken to the bot.
-            return $this->record(
+            return DeliveryOutcome::settled($this->record(
                 $customer,
                 NotificationChannel::TelegramCustomer,
                 $type,
@@ -70,7 +112,7 @@ final readonly class NotificationService
                 $summary,
                 $outboxMessageId,
                 $deduplicationKey,
-            );
+            ));
         }
 
         try {
@@ -81,7 +123,7 @@ final readonly class NotificationService
             // somebody's mind.
             $this->markBlocked($customer);
 
-            return $this->record(
+            return DeliveryOutcome::settled($this->record(
                 $customer,
                 NotificationChannel::TelegramCustomer,
                 $type,
@@ -89,10 +131,10 @@ final readonly class NotificationService
                 $summary,
                 $outboxMessageId,
                 $deduplicationKey,
-            );
+            ));
         }
 
-        return $this->record(
+        return DeliveryOutcome::settled($this->record(
             $customer,
             NotificationChannel::TelegramCustomer,
             $type,
@@ -100,7 +142,7 @@ final readonly class NotificationService
             $summary,
             $outboxMessageId,
             $deduplicationKey,
-        );
+        ));
     }
 
     /**
@@ -116,22 +158,37 @@ final readonly class NotificationService
         array $summary = [],
         ?int $outboxMessageId = null,
         ?string $deduplicationKey = null,
-    ): NotificationLog {
+    ): DeliveryOutcome {
+        $already = $this->terminalDelivery($deduplicationKey);
+
+        if ($already instanceof NotificationLog) {
+            return DeliveryOutcome::settled($already);
+        }
+
         $chatId = $this->adminChatId();
 
         if ($chatId === null) {
-            // No destination configured. Recorded rather than thrown, and
-            // deliberately not counted as delivered: the intent is answered so
-            // it does not retry forever, and the log says plainly that nobody
-            // was told.
-            return $this->record(
-                null,
-                NotificationChannel::TelegramAdmin,
-                $type,
-                NotificationStatus::Undeliverable,
-                $summary,
-                $outboxMessageId,
-                $deduplicationKey,
+            // No destination configured — which is a gap in configuration, not
+            // a failed delivery. Recorded honestly, and deliberately *not*
+            // finished: an operational alert about failed provisioning is
+            // exactly the thing that must survive until somebody can read it,
+            // and marking it done would discard it. Configuring the channel an
+            // hour later has to deliver the alert that was already waiting.
+            return DeliveryOutcome::deferred(
+                $this->record(
+                    null,
+                    NotificationChannel::TelegramAdmin,
+                    $type,
+                    NotificationStatus::Undeliverable,
+                    $summary,
+                    $outboxMessageId,
+                    // No key: this attempt must not occupy the intent's
+                    // successful-delivery slot, and several of them may
+                    // legitimately accumulate while nobody has configured
+                    // anywhere to send them.
+                    null,
+                ),
+                $this->deferSeconds(),
             );
         }
 
@@ -142,7 +199,7 @@ final readonly class NotificationService
             // emphatically not a customer who blocked the bot — there is no
             // TelegramAccount here to mark, and inventing one would attribute
             // an alert channel to a person.
-            return $this->record(
+            return DeliveryOutcome::settled($this->record(
                 null,
                 NotificationChannel::TelegramAdmin,
                 $type,
@@ -150,10 +207,10 @@ final readonly class NotificationService
                 $summary,
                 $outboxMessageId,
                 $deduplicationKey,
-            );
+            ));
         }
 
-        return $this->record(
+        return DeliveryOutcome::settled($this->record(
             null,
             NotificationChannel::TelegramAdmin,
             $type,
@@ -161,7 +218,7 @@ final readonly class NotificationService
             $summary,
             $outboxMessageId,
             $deduplicationKey,
-        );
+        ));
     }
 
     /** Whether operational alerts have anywhere to go. */
@@ -171,12 +228,35 @@ final readonly class NotificationService
     }
 
     /**
-     * The customer's private chat, or null.
+     * A terminal record of this exact delivery, if one already exists.
+     *
+     * Terminal means the delivery reached a conclusion nothing should reopen:
+     * it was sent, or the recipient refused it. `undeliverable` and `failed`
+     * are deliberately absent — the first means there was nowhere to send it
+     * and the second means it might work next time, and treating either as
+     * done would lose a message somebody should have received.
+     */
+    private function terminalDelivery(?string $deduplicationKey): ?NotificationLog
+    {
+        if ($deduplicationKey === null) {
+            return null;
+        }
+
+        $existing = NotificationLog::query()
+            ->where('deduplication_key', $deduplicationKey)
+            ->whereIn('status', [NotificationStatus::Sent->value, NotificationStatus::Blocked->value])
+            ->first();
+
+        return $existing instanceof NotificationLog ? $existing : null;
+    }
+
+    /**
+     * The customer's Telegram identity, with its private chat.
      *
      * Private only. A customer's server details must not be posted into a group
      * because the bot once saw them in one.
      */
-    private function chatFor(User $customer): ?int
+    private function accountFor(User $customer): ?TelegramAccount
     {
         $account = TelegramAccount::query()
             ->where('user_id', $customer->getKey())
@@ -184,7 +264,19 @@ final readonly class NotificationService
             ->orderByDesc('id')
             ->first();
 
-        return $account instanceof TelegramAccount ? $account->telegram_chat_id : null;
+        return $account instanceof TelegramAccount ? $account : null;
+    }
+
+    /**
+     * How long to wait before offering an alert to an unconfigured channel again.
+     *
+     * Bounded and configurable rather than immediate: retrying a missing
+     * destination every minute is a hot loop around a problem only a person can
+     * fix, and retrying it never is how the alert is lost.
+     */
+    private function deferSeconds(): int
+    {
+        return max(60, (int) $this->config->get('cloudbot.outbox.admin_defer_seconds', 1800));
     }
 
     private function markBlocked(User $customer): void

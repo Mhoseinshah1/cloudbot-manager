@@ -94,6 +94,28 @@ final readonly class OutboxDispatcher
             ->update(['processed_at' => now(), 'updated_at' => now()]) === 1;
     }
 
+    /**
+     * Put a message aside until a stated time, and give its attempt back.
+     *
+     * For the case where nothing was tried: no request was made, nothing was
+     * refused, and what is missing is configuration. Counting that as a
+     * delivery attempt would let a handful of sweeps against an unconfigured
+     * channel exhaust the retry budget of an alert that nobody has yet had the
+     * chance to receive — so the attempt is refunded and the row is simply
+     * offered again later.
+     */
+    public function defer(OutboxMessage $message, int $seconds): void
+    {
+        OutboxMessage::query()
+            ->whereKey($message->getKey())
+            ->whereNull('processed_at')
+            ->update([
+                'available_at' => now()->addSeconds(max(1, $seconds)),
+                'attempts' => DB::raw('GREATEST(attempts - 1, 0)'),
+                'updated_at' => now(),
+            ]);
+    }
+
     public function maximumAttempts(): int
     {
         return max(1, (int) $this->config->get('cloudbot.outbox.max_attempts', 5));

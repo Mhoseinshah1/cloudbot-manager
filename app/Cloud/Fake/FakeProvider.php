@@ -170,9 +170,21 @@ final class FakeProvider implements CloudProviderInterface, SupportsPowerControl
         return $this->toServerData($server);
     }
 
-    public function getServer(string $providerServerId): ProviderServerData
+    /**
+     * One server, or null when this provider has never heard of it.
+     *
+     * Null rather than a refusal, because "no such server" is an answer and a
+     * refusal is not. A deleted server still answers with its tombstone: it
+     * existed, we know what became of it, and reconciliation needs to be able
+     * to tell that apart from an identity that was never real.
+     */
+    public function getServer(string $providerServerId): ?ProviderServerData
     {
-        return $this->toServerData($this->findServerOrFail($providerServerId));
+        $server = FakeProviderServer::query()
+            ->where('provider_server_id', $providerServerId)
+            ->first();
+
+        return $server instanceof FakeProviderServer ? $this->toServerData($server) : null;
     }
 
     /**

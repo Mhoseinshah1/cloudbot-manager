@@ -153,6 +153,14 @@ return [
     'outbox' => [
         'dispatch_batch' => 100,
         'max_attempts' => 5,
+
+        // How long an operational alert waits when no admin destination is
+        // configured. Half an hour: long enough that an unconfigured channel
+        // is not a hot loop, short enough that an operator who configures one
+        // sees the waiting alerts within a working session. The alert is never
+        // discarded — configuration absence is not a delivery failure, so it
+        // does not consume the retry budget above.
+        'admin_defer_seconds' => (int) env('OUTBOX_ADMIN_DEFER_SECONDS', 1800),
     ],
 
 ];
