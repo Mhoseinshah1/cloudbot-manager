@@ -1,0 +1,28 @@
+# Local development overrides. Never used in production.
+#
+# Usage:
+#   docker compose -f compose.yaml -f compose.dev.yaml up -d
+#
+# Publishes PostgreSQL and Redis so local tooling can reach them, still bound
+# to loopback only. compose.yaml alone never publishes either.
+
+services:
+
+  app:
+    environment:
+      APP_ENV: local
+      APP_DEBUG: "true"
+      LOG_LEVEL: debug
+      # Source changes must take effect without rebuilding the image.
+      PHP_OPCACHE_VALIDATE_TIMESTAMPS: "1"
+      CONTAINER_CACHE_CONFIG: "false"
+    volumes:
+      - .:/var/www/html
+
+  postgres:
+    ports:
+      - "127.0.0.1:${DB_FORWARD_PORT:-5432}:5432"
+
+  redis:
+    ports:
+      - "127.0.0.1:${REDIS_FORWARD_PORT:-6379}:6379"

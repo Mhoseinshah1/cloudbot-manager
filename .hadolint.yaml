@@ -1,0 +1,10 @@
+# Alpine package versions are not pinned (DL3018).
+#
+# apk's repositories only carry the current version of each package, so a pin
+# such as icu-libs=74.2-r0 stops the image building the moment Alpine publishes
+# a patch. The base image tag is pinned instead, which is what determines the
+# package set, and PECL extensions are pinned individually.
+ignored:
+  - DL3018
+
+failure-threshold: warning
