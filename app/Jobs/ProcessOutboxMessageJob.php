@@ -103,6 +103,20 @@ final class ProcessOutboxMessageJob implements ShouldQueue
             return;
         }
 
+        if (! $dispatcher->isDue($message)) {
+            // Deferred since this job was queued. Duplicate jobs for one
+            // message are expected and safe, but a duplicate that was already
+            // waiting in Redis when the delay was written would otherwise walk
+            // straight past it: releasing the current job for N seconds says
+            // nothing about the one enqueued a moment earlier.
+            //
+            // So `available_at` is the durable timing authority, checked here
+            // as well as by the sweep. Nothing is sent, nothing is recorded,
+            // and no attempt is spent; the sweep offers the message again once
+            // it is genuinely due.
+            return;
+        }
+
         // Spent before the work. A message that crashes its worker has still
         // used an attempt, which is what stops it being retried forever.
         if (! $dispatcher->reserveAttempt($message)) {
@@ -112,8 +126,17 @@ final class ProcessOutboxMessageJob implements ShouldQueue
         try {
             $disposition = $router->route($message);
         } catch (TelegramRateLimited $limited) {
-            // Telegram asked us to wait. Released for exactly that long, and
-            // emphatically not marked processed: the message has not been sent.
+            // Telegram asked us to wait. Written to the row before the job is
+            // released, because releasing this worker only delays this worker —
+            // a duplicate already in the queue would otherwise call Telegram
+            // again immediately, which is the thing being asked not to happen.
+            //
+            // The attempt stays consumed: a request genuinely was made and
+            // genuinely was refused. That is the difference from a deferral,
+            // where nothing left the building and the attempt is handed back.
+            $dispatcher->postpone($message, $limited->retryAfterSeconds);
+
+            // The message is not marked processed: it has not been sent.
             $this->release($limited->retryAfterSeconds);
 
             return;

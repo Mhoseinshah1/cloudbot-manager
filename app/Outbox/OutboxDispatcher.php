@@ -76,8 +76,27 @@ final readonly class OutboxDispatcher
         return OutboxMessage::query()
             ->whereKey($message->getKey())
             ->whereNull('processed_at')
+            // Due-ness is part of the claim, not a check somebody remembers to
+            // make first. A message deferred to next week must not have an
+            // attempt taken out of it by a job that was already sitting in the
+            // queue when the deferral was written — and putting the condition
+            // in the WHERE clause means no caller can skip it.
+            ->where('available_at', '<=', now())
             ->where('attempts', '<', $this->maximumAttempts())
             ->update(['attempts' => DB::raw('attempts + 1'), 'updated_at' => now()]) === 1;
+    }
+
+    /**
+     * Whether this message may be worked on right now.
+     *
+     * `available_at` is the durable timing authority, and the queue is not. A
+     * delay written to PostgreSQL has to hold against a job that was enqueued
+     * before it — releasing the current job for N seconds says nothing about
+     * the duplicate already waiting in Redis.
+     */
+    public function isDue(OutboxMessage $message): bool
+    {
+        return ! $message->available_at->isAfter(now());
     }
 
     /**
@@ -112,6 +131,36 @@ final readonly class OutboxDispatcher
             ->update([
                 'available_at' => now()->addSeconds(max(1, $seconds)),
                 'attempts' => DB::raw('GREATEST(attempts - 1, 0)'),
+                'updated_at' => now(),
+            ]);
+    }
+
+    /**
+     * Push a message's not-before time out, keeping the attempt it spent.
+     *
+     * The counterpart to defer(), and deliberately not the same thing. This is
+     * for a delivery that genuinely happened and was refused — Telegram
+     * answered 429 — so the attempt stays consumed and only the timing moves.
+     * defer() is for a delivery that never left the building, where no attempt
+     * should be charged at all.
+     *
+     * Only ever forward: a later deadline already on the row wins, so a second
+     * worker arriving with a shorter delay cannot pull the message back into
+     * a window somebody else already ruled out.
+     */
+    public function postpone(OutboxMessage $message, int $seconds): void
+    {
+        $notBefore = now()->addSeconds(max(1, $seconds));
+
+        // "Only forward" expressed as a condition rather than a GREATEST() with
+        // a timestamp pasted into SQL: the comparison is a bound parameter, and
+        // a row already deferred past this point simply does not match.
+        OutboxMessage::query()
+            ->whereKey($message->getKey())
+            ->whereNull('processed_at')
+            ->where('available_at', '<', $notBefore)
+            ->update([
+                'available_at' => $notBefore,
                 'updated_at' => now(),
             ]);
     }
