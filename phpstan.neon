@@ -1,0 +1,17 @@
+includes:
+    - vendor/larastan/larastan/extension.neon
+
+parameters:
+    level: 6
+
+    # Application code. The test suite is exercised by running it, not by
+    # analysing it: Pest binds `$this` inside closures at runtime, which static
+    # analysis reports as calls on the wrong class. Adding tests here would mean
+    # carrying a baseline of noise that hides real findings.
+    paths:
+        - app
+        - config
+        - database
+        - routes
+
+    treatPhpDocTypesAsCertain: false

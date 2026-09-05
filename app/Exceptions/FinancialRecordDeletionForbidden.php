@@ -1,0 +1,80 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Exceptions;
+
+use RuntimeException;
+
+/**
+ * Raised when something tries to erase a financial record.
+ *
+ * Payments and invoices are not immutable — a payment moves from pending to
+ * paid, an invoice's status can legitimately change — but they are retained.
+ * Deleting one destroys the answer to "what was this customer charged, and
+ * why", which is the question the record exists to answer, and which is asked
+ * long after the row stops being operationally interesting.
+ *
+ * A record that turns out to be wrong is corrected by a further record — a
+ * refund, a cancellation — that says so, leaving the history of the mistake
+ * intact. That is a different thing from removing the evidence.
+ */
+final class FinancialRecordDeletionForbidden extends RuntimeException
+{
+    private function __construct(public readonly string $record, string $message)
+    {
+        parent::__construct($message);
+    }
+
+    public static function forPayment(): self
+    {
+        return new self('payment', 'Payments are retained financial history and cannot be deleted.');
+    }
+
+    public static function forInvoice(): self
+    {
+        return new self('invoice', 'Invoices are retained financial history and cannot be deleted.');
+    }
+
+    public static function forOrder(): self
+    {
+        return new self('order', 'Orders are retained financial history and cannot be deleted.');
+    }
+
+    public static function forProvisioningAttempt(): self
+    {
+        return new self(
+            'provisioning_attempt',
+            'Provisioning attempts are retained history and cannot be deleted.',
+        );
+    }
+
+    public static function forServer(): self
+    {
+        return new self(
+            'server',
+            'Servers are retained history and cannot be deleted; a server that is gone is terminated.',
+        );
+    }
+
+    public static function forSubscription(): self
+    {
+        return new self('subscription', 'Subscriptions are retained service history and cannot be deleted.');
+    }
+
+    public static function forServerAction(): self
+    {
+        return new self(
+            'server_action',
+            'Server actions are retained operational history and cannot be deleted.',
+        );
+    }
+
+    public static function forNotificationLog(): self
+    {
+        return new self(
+            'notification_log',
+            'Notification history is retained for support and cannot be deleted.',
+        );
+    }
+}

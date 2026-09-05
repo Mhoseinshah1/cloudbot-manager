@@ -1,0 +1,59 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Orders\Data;
+
+use App\Enums\ImageSelectionMode;
+use App\Models\ProductLocationPrice;
+use App\Models\User;
+
+/**
+ * What a customer says they want to buy.
+ *
+ * Everything a purchase decision depends on, in one value, so that a retry
+ * carrying the same idempotency key can be compared against the order that
+ * already exists field by field. Anything absent from here cannot be part of
+ * that comparison, which is why the accepted terms version and the chosen image
+ * are in it: a retry that quietly changed either would be a different purchase
+ * wearing the same key.
+ *
+ * There is no price. A customer states what they want; what it costs is decided
+ * by PricingService at the moment the order is created, and accepting a claimed
+ * price from a caller would be accepting a claimed price from a customer.
+ */
+final readonly class PurchaseIntent
+{
+    public function __construct(
+        public User $user,
+        public ProductLocationPrice $locationPrice,
+        /** The terms version the customer says they accepted. */
+        public string $acceptedAupVersion,
+        /** Whether they actually accepted. False is not a purchase. */
+        public bool $aupAccepted,
+        /** Makes a retry recognisable as the same purchase. */
+        public string $idempotencyKey,
+        /** Chosen operating system image, or null to take the location's default. */
+        public ?int $providerImageId = null,
+        /**
+         * The offer the customer was shown, when they were shown one.
+         *
+         * Null for a caller that never previewed anything — a test, an
+         * operator tool — and set by any flow that put a price in front of a
+         * person. It can only refuse a sale, never set its price.
+         */
+        public ?ApprovedQuote $approved = null,
+    ) {}
+
+    /**
+     * Whether this intent names an image or asks for the location's default.
+     *
+     * A real part of the purchase, not an implementation detail: the two are
+     * different requests, and the order records which one it was so that a
+     * retry switching between them is recognised as a different purchase.
+     */
+    public function imageSelectionMode(): ImageSelectionMode
+    {
+        return $this->providerImageId === null ? ImageSelectionMode::Default : ImageSelectionMode::Explicit;
+    }
+}

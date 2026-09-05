@@ -1,0 +1,257 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Least privilege: nothing here writes to the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PHP_VERSION: '8.3'
+
+jobs:
+
+  tests:
+    name: Tests (PHP 8.3, PostgreSQL 16, Redis 7)
+    runs-on: ubuntu-24.04
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: cloudbot_test
+          POSTGRES_USER: cloudbot
+          POSTGRES_PASSWORD: ci_not_a_secret
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cloudbot -d cloudbot_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DB_CONNECTION: pgsql
+      DB_HOST: 127.0.0.1
+      DB_PORT: 5432
+      DB_DATABASE: cloudbot_test
+      DB_USERNAME: cloudbot
+      DB_PASSWORD: ci_not_a_secret
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: 6379
+      CACHE_STORE: redis
+      SESSION_DRIVER: database
+      QUEUE_CONNECTION: redis
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: bcmath, intl, pcntl, pdo_pgsql, pgsql, redis, zip
+          coverage: none
+          tools: composer:v2
+
+      - name: Validate composer files
+        run: composer validate --strict
+
+      - name: Cache Composer packages
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/composer/files
+          key: composer-${{ runner.os }}-php${{ env.PHP_VERSION }}-${{ hashFiles('composer.lock') }}
+          restore-keys: composer-${{ runner.os }}-php${{ env.PHP_VERSION }}-
+
+      - name: Install dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: Prepare environment
+        run: |
+          cp .env.ci .env
+          # Generated per run: a committed key would be a shipped secret.
+          php artisan key:generate
+
+      - name: Run migrations
+        run: php artisan migrate --force
+
+      - name: Verify migrations roll back and re-apply
+        run: |
+          php artisan migrate:rollback --force
+          php artisan migrate --force
+
+      - name: Run the full test suite
+        run: vendor/bin/pest --ci
+
+  static:
+    name: Static analysis
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          extensions: bcmath, intl, pcntl, pdo_pgsql, pgsql, redis, zip
+          coverage: none
+          tools: composer:v2
+
+      - name: Install dependencies
+        run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: PHPStan
+        run: vendor/bin/phpstan analyse --no-progress --error-format=github
+
+      - name: Pint
+        run: vendor/bin/pint --test
+
+  security:
+    name: Security and dependencies
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # gitleaks scans history, which needs more than the default shallow clone.
+          fetch-depth: 0
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
+        with:
+          php-version: ${{ env.PHP_VERSION }}
+          coverage: none
+          tools: composer:v2
+
+      - name: Audit dependencies for known vulnerabilities
+        run: composer audit --locked
+
+      - name: Scan for committed secrets
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  shell:
+    name: Shell scripts
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      # bash -n parses each script; POSIX sh is a subset of bash, so this is a
+      # valid check for the sh scripts too. The scripts keep their #!/bin/sh
+      # shebang on purpose: they run in Alpine containers that have no bash.
+      # ShellCheck reads that shebang and lints in sh mode, which is what keeps
+      # a bashism from being introduced and breaking the container at startup.
+      - name: Check shell syntax
+        run: |
+          found=0
+          while IFS= read -r script; do
+            found=1
+            echo "checking ${script}"
+            bash -n "${script}"
+          done < <(find . -path ./vendor -prune -o -name '*.sh' -type f -print)
+          if [ "${found}" -eq 0 ]; then
+            echo "no shell scripts present"
+          fi
+
+      - name: ShellCheck
+        uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # 2.0.0
+        with:
+          ignore_paths: vendor
+
+  docker:
+    name: Docker build and topology
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Lint the Dockerfile
+        uses: hadolint/hadolint-action@54c9adbab1582c2ef04b2016b760714a4bfde3cf # v3.1.0
+        with:
+          dockerfile: docker/php/Dockerfile
+
+      - name: Prepare environment
+        run: |
+          cp .env.ci .env
+          # Compose refuses to start without a real key; generate one per run.
+          key="base64:$(head -c 32 /dev/urandom | base64)"
+          sed -i "s|^APP_KEY=.*|APP_KEY=${key}|" .env
+          sed -i 's|^DB_HOST=.*|DB_HOST=postgres|' .env
+          sed -i 's|^REDIS_HOST=.*|REDIS_HOST=redis|' .env
+
+      - name: Validate Compose configuration
+        run: |
+          docker compose --env-file .env config
+          docker compose --env-file .env -f compose.yaml -f compose.dev.yaml config
+
+      - name: Build images
+        run: |
+          docker build --target app -f docker/php/Dockerfile -t cloudbot-manager-app:ci .
+          docker build --target nginx -f docker/php/Dockerfile -t cloudbot-manager-nginx:ci .
+
+      - name: Start the stack
+        run: APP_IMAGE_TAG=ci docker compose --env-file .env up -d --wait --wait-timeout 180
+
+      - name: Verify the health endpoint through nginx
+        run: |
+          curl --fail --silent --show-error http://127.0.0.1:8080/health | tee /tmp/health.json
+          grep -q '"status":"ok"' /tmp/health.json
+
+      - name: Verify PostgreSQL and Redis are not published to the host
+        run: |
+          for port in 5432 6379; do
+            if (echo > /dev/tcp/127.0.0.1/"${port}") 2>/dev/null; then
+              echo "port ${port} is reachable on the host; it must not be published"
+              exit 1
+            fi
+          done
+          echo "neither PostgreSQL nor Redis is reachable from the host"
+
+      - name: Show diagnostics on failure
+        if: failure()
+        run: |
+          docker compose ps
+          docker compose logs --tail=100 app nginx || true
+
+      - name: Tear down
+        if: always()
+        # Never `down -v`: that would destroy the data volumes.
+        run: docker compose down --remove-orphans
+
+  all-checks:
+    name: All Checks
+    runs-on: ubuntu-24.04
+    needs: [tests, static, security, shell, docker]
+    if: always()
+    steps:
+      - name: Fail if any job did not succeed
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
+        run: |
+          echo 'One or more CI jobs did not succeed.'
+          exit 1
+
+      - name: All checks passed
+        run: echo 'All CI jobs succeeded.'
