@@ -26,7 +26,34 @@ use App\Cloud\Fake\FakeProvider;
  */
 final class CoreOnlyProvider implements CloudProviderInterface
 {
+    /** @var list<string> */
+    public array $calls = [];
+
+    private bool $issuesCredentials = true;
+
+    private ?\Closure $afterCreate = null;
+
     public function __construct(private readonly FakeProvider $inner) {}
+
+    /**
+     * Model a provider that authenticates some other way.
+     *
+     * A valid shape: the create builds a machine and issues no root password,
+     * and there is no reset capability because there is nothing to reset. The
+     * disposition still says `Created`, which is what makes the answer a
+     * complete fact rather than a silence.
+     */
+    public function withoutCredential(): self
+    {
+        $this->issuesCredentials = false;
+
+        return $this;
+    }
+
+    public function callCount(string $method): int
+    {
+        return count(array_filter($this->calls, static fn (string $call): bool => $call === $method));
+    }
 
     public function code(): string
     {
@@ -77,7 +104,32 @@ final class CoreOnlyProvider implements CloudProviderInterface
 
     public function createServer(CreateServerRequest $request): ProviderCreateResult
     {
-        return $this->inner->createServer($request);
+        $this->calls[] = 'createServer';
+
+        $created = $this->inner->createServer($request);
+
+        if ($this->issuesCredentials || ! $created->isNew()) {
+            return $created;
+        }
+
+        if ($this->afterCreate !== null) {
+            return ($this->afterCreate)($created->server);
+        }
+
+        return ProviderCreateResult::created($created->server);
+    }
+
+    /**
+     * Reshape the create answer, the way ScriptedProvider does.
+     *
+     * @param  \Closure(ProviderServerData): ProviderCreateResult  $callback
+     */
+    public function afterCreate(\Closure $callback): self
+    {
+        $this->issuesCredentials = false;
+        $this->afterCreate = $callback;
+
+        return $this;
     }
 
     public function getServer(string $providerServerId): ?ProviderServerData

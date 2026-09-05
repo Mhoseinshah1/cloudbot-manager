@@ -107,11 +107,29 @@ final readonly class ServerActionExecutor
             return;
         }
 
+        // An operation the provider already accepted belongs to polling, not to
+        // this method. Checked here as well as in the reservation's WHERE
+        // clause: the database is what enforces it, and this makes the reason
+        // visible where a reader is deciding whether to send something.
+        if ($action->status === ServerActionStatus::Running || $action->provider_action_id !== null) {
+            return;
+        }
+
         // Reserved before the call, never counted after it. A worker that dies
         // inside a delete has still spent its attempt; counting afterwards is
         // how a crash loop sends the same destructive request forever.
+        //
+        // The same statement clears the previous call's retry evidence, so a
+        // worker that dies after this point leaves no stale "safely refused"
+        // fact for reconciliation to mistake for this attempt's outcome.
         if (! $this->actions->reserveAttempt($action, $this->maximumAttempts())) {
-            $this->exhausted($action);
+            // Refused for one of several reasons, and only one of them is
+            // exhaustion. Somebody else took the action, it acquired a provider
+            // handle, or a barrier was written between the checks above and
+            // this statement — none of which is an action to park.
+            if ($action->attempts >= $this->maximumAttempts()) {
+                $this->exhausted($action);
+            }
 
             return;
         }
@@ -186,17 +204,92 @@ final readonly class ServerActionExecutor
         }
 
         if ($result->status === ProviderActionStatus::Error) {
-            $this->actions->settle(
-                $action,
-                ServerActionStatus::Failed,
-                providerActionId: $result->providerActionId,
-                category: ProviderErrorCategory::TransientProviderError,
-            );
+            $this->handleActionError($action, $result);
 
             return;
         }
 
         $this->succeed($action, $server, $result->providerActionId);
+    }
+
+    /**
+     * The provider says the operation it accepted has failed.
+     *
+     * The old behaviour recorded every one of these as `failed` carrying
+     * `TransientProviderError`, which is a contradiction the row itself states:
+     * that category reports `isRetryable()`, while `failed` is settled and
+     * excluded from reconciliation. The action was simultaneously "safe to try
+     * again" and "never going to be tried again", and the customer's request
+     * was silently dropped.
+     *
+     * The category now comes from the adapter, which is the only thing that
+     * knows. Its absence is not an excuse to invent one: a provider error
+     * nobody has classified is a fact nobody has established, and guessing
+     * "transient" would be inventing permission to repeat a delete.
+     *
+     * One thing is true in every branch: the operation the provider accepted is
+     * over. There is nothing left to poll, so the handle is cleared — either as
+     * part of settling, or as part of returning the action to a state where a
+     * later attempt may start a genuinely new operation.
+     */
+    private function handleActionError(ServerAction $action, ProviderActionData $result): void
+    {
+        $category = $result->errorCategory;
+
+        if ($category === null) {
+            // Unclassified. The safest true statement is that nobody knows what
+            // this means, and that is a person's to read rather than a retry to
+            // authorize.
+            $this->actions->settle(
+                $action,
+                ServerActionStatus::NeedsAttention,
+                providerActionId: $result->providerActionId,
+                category: ProviderErrorCategory::UncertainResult,
+            );
+
+            Log::warning('server_action.unclassified_provider_error', [
+                'server_action_id' => $action->getKey(),
+                'action' => $action->action->value,
+                'provider_action_id' => $result->providerActionId,
+            ]);
+
+            return;
+        }
+
+        if ($category->isOutcomeUnknown()) {
+            // The operation failed in a way that says nothing about whether it
+            // took effect. Never repeated blindly.
+            $this->actions->settle(
+                $action, ServerActionStatus::NeedsAttention, category: $category,
+            );
+
+            return;
+        }
+
+        if ($category->isRetryable()) {
+            // Terminally failed at the provider, and safe to ask for again. The
+            // action returns to pending so a later attempt may start a new
+            // operation — behind the durable barrier, within the durable
+            // budget, and with the finished handle cleared so nothing tries to
+            // poll an operation that has already ended.
+            $this->actions->reopenForRetry($action, $this->retryAfterSeconds(), $category);
+
+            Log::info('server_action.provider_action_retryable_error', [
+                'server_action_id' => $action->getKey(),
+                'action' => $action->action->value,
+                'category' => $category->value,
+            ]);
+
+            return;
+        }
+
+        // Deterministic. Repeating the identical request cannot change it.
+        $this->actions->settle(
+            $action,
+            ServerActionStatus::Failed,
+            providerActionId: $result->providerActionId,
+            category: $category,
+        );
     }
 
     /**

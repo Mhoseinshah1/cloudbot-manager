@@ -125,7 +125,7 @@ final class FakeProvider implements CloudProviderInterface, SupportsPasswordRese
             // provider replaying an earlier result has none left to give, and
             // pretending otherwise would let a caller believe a credential it
             // never received is safely in hand.
-            return ProviderCreateResult::withoutCredential($existing);
+            return ProviderCreateResult::existing($existing);
         }
 
         $this->guardCatalog($request);
@@ -171,9 +171,11 @@ final class FakeProvider implements CloudProviderInterface, SupportsPasswordRese
             $winner = $this->findByProvisioningToken($request->provisioningToken);
 
             if ($winner instanceof ProviderServerData) {
-                // The losing side of the token race. The winner issued the
-                // password, and this caller never held it.
-                return ProviderCreateResult::withoutCredential($winner);
+                // The losing side of the token race. The winner built the
+                // server and issued its password; this caller never held it,
+                // and saying `existing` is what stops that being read as
+                // "this machine has no password".
+                return ProviderCreateResult::existing($winner);
             }
 
             throw ProviderException::make(
@@ -184,8 +186,9 @@ final class FakeProvider implements CloudProviderInterface, SupportsPasswordRese
             );
         }
 
-        // The one and only moment this provider hands a credential over.
-        return new ProviderCreateResult(
+        // The one and only moment this provider hands a credential over, and
+        // the one answer that establishes what credential this machine has.
+        return ProviderCreateResult::created(
             $this->toServerData($server),
             new SensitiveRootCredential($password),
         );

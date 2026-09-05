@@ -17,6 +17,7 @@ use Brick\Math\Exception\MathException;
 use Carbon\CarbonImmutable;
 use DateTimeInterface;
 use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\DB;
 
 /**
  * Records exchange rates, and answers which one applies.
@@ -31,7 +32,10 @@ use Illuminate\Support\Carbon;
  */
 final readonly class ExchangeRateService
 {
-    public function __construct(private AuditRecorder $audit) {}
+    public function __construct(
+        private AuditRecorder $audit,
+        private FxAuthorityLock $authority,
+    ) {}
 
     /**
      * Record a rate entered by an administrator.
@@ -51,30 +55,47 @@ final readonly class ExchangeRateService
 
         $currency = self::normalizeCurrency($currency);
         $rate = $this->parseRate($rateToToman);
+        $effectiveAt = $effectiveFrom === null ? Carbon::now() : Carbon::instance(Carbon::parse($effectiveFrom));
 
-        $rateRow = ExchangeRate::query()->create([
-            'currency' => $currency,
-            'rate_to_toman' => (string) $rate,
-            'source' => ExchangeRateSource::Manual,
-            'effective_from' => $effectiveFrom === null ? Carbon::now() : Carbon::instance(Carbon::parse($effectiveFrom)),
-            'created_by_admin_id' => $actor->getKey(),
-        ]);
+        // One transaction, holding this currency's authority exclusively.
+        //
+        // A rate is appended rather than updated, so the new row becomes the
+        // answer `currentRate()` gives the moment it commits — which means an
+        // order priced against the previous rate and still uncommitted would be
+        // committing under authority that had already moved. No row lock can
+        // hold back an INSERT, so the coordination is explicit: this waits for
+        // any sale currently pricing in this currency, and those sales are
+        // short because none of them does network work.
+        //
+        // The audit entry is written inside the same transaction, so a recorded
+        // rate and the record of who recorded it cannot come apart.
+        return DB::transaction(function () use ($currency, $rate, $effectiveAt, $actor): ExchangeRate {
+            $this->authority->exclusive($currency);
 
-        $this->audit->record(
-            AuditEvent::ExchangeRateRecorded,
-            actor: $actor,
-            subject: $rateRow,
-            after: ['rate_to_toman' => $rateRow->rate_to_toman],
-            metadata: [
-                'exchange_rate_id' => $rateRow->getKey(),
-                'currency' => $rateRow->currency,
-                'rate_to_toman' => $rateRow->rate_to_toman,
-                'effective_from' => $rateRow->effective_from->toIso8601String(),
-                'source' => ExchangeRateSource::Manual->value,
-            ],
-        );
+            $rateRow = ExchangeRate::query()->create([
+                'currency' => $currency,
+                'rate_to_toman' => (string) $rate,
+                'source' => ExchangeRateSource::Manual,
+                'effective_from' => $effectiveAt,
+                'created_by_admin_id' => $actor->getKey(),
+            ]);
 
-        return $rateRow;
+            $this->audit->record(
+                AuditEvent::ExchangeRateRecorded,
+                actor: $actor,
+                subject: $rateRow,
+                after: ['rate_to_toman' => $rateRow->rate_to_toman],
+                metadata: [
+                    'exchange_rate_id' => $rateRow->getKey(),
+                    'currency' => $rateRow->currency,
+                    'rate_to_toman' => $rateRow->rate_to_toman,
+                    'effective_from' => $rateRow->effective_from->toIso8601String(),
+                    'source' => ExchangeRateSource::Manual->value,
+                ],
+            );
+
+            return $rateRow;
+        });
     }
 
     /**

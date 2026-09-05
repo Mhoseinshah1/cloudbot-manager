@@ -52,6 +52,8 @@ final class ScriptedProvider implements CloudProviderInterface, SupportsPassword
 
     private ?Closure $onPasswordReset = null;
 
+    private ?Closure $onGetAction = null;
+
     public function __construct(private readonly FakeProvider $inner) {}
 
     /**
@@ -225,7 +227,7 @@ final class ScriptedProvider implements CloudProviderInterface, SupportsPassword
             }
 
             if ($result instanceof ProviderServerData) {
-                return ProviderCreateResult::withoutCredential($result);
+                return ProviderCreateResult::created($result);
             }
         }
 
@@ -241,10 +243,26 @@ final class ScriptedProvider implements CloudProviderInterface, SupportsPassword
 
             return $scripted instanceof ProviderCreateResult
                 ? $scripted
-                : new ProviderCreateResult($scripted, $created->rootCredential);
+                : new ProviderCreateResult($scripted, $created->disposition, $created->rootCredential);
         }
 
         return $created;
+    }
+
+    /**
+     * Script what polling one provider action answers.
+     *
+     * One-shot, like the other hooks. The provider action failing after it was
+     * accepted is a real shape no simulator produces on its own, and it is the
+     * case where a wrong classification sends a delete twice.
+     *
+     * @param  Closure(string, FakeProvider): mixed  $callback
+     */
+    public function onGetAction(Closure $callback): self
+    {
+        $this->onGetAction = $callback;
+
+        return $this;
     }
 
     /**
@@ -257,7 +275,7 @@ final class ScriptedProvider implements CloudProviderInterface, SupportsPassword
     public function withoutCredential(): self
     {
         return $this->afterCreate(
-            static fn (ProviderServerData $server): ProviderCreateResult => ProviderCreateResult::withoutCredential($server),
+            static fn (ProviderServerData $server): ProviderCreateResult => ProviderCreateResult::created($server),
         );
     }
 
@@ -326,25 +344,28 @@ final class ScriptedProvider implements CloudProviderInterface, SupportsPassword
     public function powerOn(string $providerServerId): ProviderActionData
     {
         $this->calls[] = 'powerOn';
-        $this->intercept('powerOn');
 
-        return $this->inner->powerOn($providerServerId);
+        $scripted = $this->intercept('powerOn');
+
+        return $scripted ?? $this->inner->powerOn($providerServerId);
     }
 
     public function powerOff(string $providerServerId): ProviderActionData
     {
         $this->calls[] = 'powerOff';
-        $this->intercept('powerOff');
 
-        return $this->inner->powerOff($providerServerId);
+        $scripted = $this->intercept('powerOff');
+
+        return $scripted ?? $this->inner->powerOff($providerServerId);
     }
 
     public function reboot(string $providerServerId): ProviderActionData
     {
         $this->calls[] = 'reboot';
-        $this->intercept('reboot');
 
-        return $this->inner->reboot($providerServerId);
+        $scripted = $this->intercept('reboot');
+
+        return $scripted ?? $this->inner->reboot($providerServerId);
     }
 
     /**
@@ -354,30 +375,57 @@ final class ScriptedProvider implements CloudProviderInterface, SupportsPassword
      * one — an operation that could never succeed would prove only that a
      * retry loop stops, never that recovery works.
      */
-    private function intercept(string $operation): void
+    /**
+     * Run whatever this test scripted for one operation.
+     *
+     * A hook may throw — the usual case, for a provider that refuses — or
+     * return a normalized answer to stand in for the simulator's. The second
+     * matters for the answers FakeProvider never gives: it settles every
+     * operation immediately, and an action the provider *accepted and is still
+     * working on* is a real shape with real consequences.
+     *
+     * One-shot, so a test can make the first call misbehave and let the next
+     * one through.
+     */
+    private function intercept(string $operation): ?ProviderActionData
     {
         $hook = $this->onOperation[$operation] ?? null;
 
         if ($hook === null) {
-            return;
+            return null;
         }
 
         unset($this->onOperation[$operation]);
 
-        $hook($operation);
+        $result = $hook($operation);
+
+        return $result instanceof ProviderActionData ? $result : null;
     }
 
     public function deleteServer(string $providerServerId): ProviderActionData
     {
-        $this->intercept('deleteServer');
+        $scripted = $this->intercept('deleteServer');
 
         $this->calls[] = 'deleteServer';
 
-        return $this->inner->deleteServer($providerServerId);
+        return $scripted ?? $this->inner->deleteServer($providerServerId);
     }
 
     public function getAction(string $providerActionId): ProviderActionData
     {
+        $this->calls[] = 'getAction';
+
+        if ($this->onGetAction instanceof Closure) {
+            $hook = $this->onGetAction;
+            $this->onGetAction = null;
+
+            $scripted = $hook($providerActionId, $this->inner);
+
+            if ($scripted instanceof ProviderActionData) {
+                return $scripted;
+            }
+        }
+
         return $this->inner->getAction($providerActionId);
     }
 

@@ -15,6 +15,7 @@ use App\Outbox\OutboxTopic;
 use App\Outbox\OutboxWriter;
 use App\Servers\Exceptions\ServerActionNotAllowed;
 use Carbon\CarbonImmutable;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 
@@ -193,8 +194,44 @@ final readonly class ServerActionService
         return ServerAction::query()
             ->whereKey($action->getKey())
             ->where('attempts', '<', $maximum)
-            ->whereIn('status', [ServerActionStatus::Pending->value, ServerActionStatus::Running->value])
-            ->update(['attempts' => DB::raw('attempts + 1'), 'updated_at' => now()]) === 1;
+            // Pending only. `Running` means the provider accepted an operation
+            // and is still working on it, and initiating a second one would ask
+            // for the same reboot or the same delete twice. The per-server lock
+            // does not prevent that on its own: it serializes two workers, and
+            // the second one simply arrives after the first has released. Only
+            // the durable state can refuse it.
+            ->where('status', ServerActionStatus::Pending->value)
+            // The same fact from the other side. A provider handle means there
+            // is an outstanding operation to poll, and polling is where it
+            // belongs — never re-initiation.
+            ->whereNull('provider_action_id')
+            // The durable barrier, in the WHERE clause rather than only in a
+            // caller's check. A prequeued duplicate cannot walk past a delay by
+            // forgetting to look first.
+            ->where(function (Builder $query): void {
+                $query->whereNull('retry_after')->orWhere('retry_after', '<=', now());
+            })
+            ->update([
+                'attempts' => DB::raw('attempts + 1'),
+                // Cleared in the same statement that grants permission to call
+                // the provider, and this is the whole point of doing it here.
+                //
+                // These two columns are evidence about the *last* provider
+                // call: a category the enum calls retryable, and the time after
+                // which another attempt is allowed. Leaving them in place while
+                // a new attempt goes out makes them a lie the moment the call
+                // leaves — and a worker that then dies leaves reconciliation
+                // reading attempt N-1's "safely refused, nothing happened"
+                // against attempt N, whose outcome nobody knows. That is how a
+                // delete gets sent a second time.
+                //
+                // After this statement succeeds the row means exactly one
+                // thing: a provider write may now be in flight and its outcome
+                // is not yet known.
+                'error_category' => null,
+                'retry_after' => null,
+                'updated_at' => now(),
+            ]) === 1;
     }
 
     /**
@@ -225,6 +262,45 @@ final readonly class ServerActionService
             ->update([
                 'retry_after' => CarbonImmutable::now()->addSeconds(max(1, $seconds)),
                 'error_category' => $category->value,
+                'updated_at' => now(),
+            ]) === 1;
+    }
+
+    /**
+     * Return a failed provider operation to a state a later attempt may use.
+     *
+     * For the one case where the provider's own answer is both terminal and
+     * safe: the operation it accepted has ended in failure, and the normalized
+     * category says repeating the request could work.
+     *
+     * Three things move together, and doing them in one statement is what makes
+     * this safe rather than a sequence somebody can interleave. The status goes
+     * back to pending, so a later execution may start a genuinely new
+     * operation. The finished provider handle is cleared, because polling an
+     * operation that has already ended is how a reconciler settles an action
+     * from stale evidence. And a durable barrier is written, so the retry
+     * cannot be immediate and cannot be walked past by a job that was already
+     * queued.
+     *
+     * The attempt this consumed stays consumed. A provider write genuinely
+     * happened; the budget is what stops this becoming a loop.
+     *
+     * Compare-and-set on the running state, so this cannot reopen an action
+     * somebody else has already settled.
+     *
+     * @return bool Whether this worker made the transition.
+     */
+    public function reopenForRetry(ServerAction $action, int $seconds, ProviderErrorCategory $category): bool
+    {
+        return ServerAction::query()
+            ->whereKey($action->getKey())
+            ->whereIn('status', [ServerActionStatus::Pending->value, ServerActionStatus::Running->value])
+            ->update([
+                'status' => ServerActionStatus::Pending->value,
+                'provider_action_id' => null,
+                'error_category' => $category->value,
+                'retry_after' => CarbonImmutable::now()->addSeconds(max(1, $seconds)),
+                'settled_at' => null,
                 'updated_at' => now(),
             ]) === 1;
     }

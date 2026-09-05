@@ -20,6 +20,7 @@ use App\Orders\Exceptions\OrderNotPlaceable;
 use App\Outbox\OutboxTopic;
 use App\Outbox\OutboxWriter;
 use App\Pricing\Data\PriceQuote;
+use App\Pricing\FxAuthorityLock;
 use App\Pricing\PricingService;
 use App\Settings\SettingsService;
 use App\Wallet\WalletService;
@@ -57,6 +58,7 @@ final readonly class OrderService
         private AuditRecorder $audit,
         private PurchasePolicyService $policy,
         private OutboxWriter $outbox,
+        private FxAuthorityLock $fx,
     ) {}
 
     /**
@@ -111,7 +113,18 @@ final readonly class OrderService
                 // so the administrator's write waits for us and ours sees
                 // whatever they already committed. Concurrent purchases hold
                 // shared locks together and do not block each other.
-                $this->lockSaleControls($intent);
+                $currency = $this->lockSaleControls($intent);
+
+                if ($currency !== null) {
+                    // The one authority a row lock cannot hold. Rates are
+                    // appended rather than updated, so a share lock on the
+                    // current row does nothing to stop the next one committing
+                    // and becoming the authority a moment before this order
+                    // does. Held shared until this transaction ends, so
+                    // concurrent purchases never wait on each other and only a
+                    // rate writer does.
+                    $this->fx->shared($currency);
+                }
 
                 // Authoritative now, on rows nobody may change until we commit.
                 $this->assertCustomerMayBuy($customer);
@@ -199,8 +212,11 @@ final readonly class OrderService
      * Nothing is locked that a sale does not depend on, and no lock is taken
      * before the customer's own row, which stays the first lock in the system's
      * global order.
+     *
+     * @return string|null The provider currency this sale prices in, read from
+     *                     the locked row, or null when the catalog line is gone.
      */
-    private function lockSaleControls(PurchaseIntent $intent): void
+    private function lockSaleControls(PurchaseIntent $intent): ?string
     {
         // Ordered by key, so two callers take them in the same sequence.
         $keys = [
@@ -220,8 +236,10 @@ final readonly class OrderService
         if ($price === null) {
             // Gone since the customer chose it. The quote below refuses it with
             // the reason a customer can be shown; nothing to lock here.
-            return;
+            return null;
         }
+
+        $currency = is_string($price->provider_currency) ? $price->provider_currency : null;
 
         $product = DB::table('products')
             ->where('id', $price->product_id)
@@ -229,12 +247,14 @@ final readonly class OrderService
             ->first();
 
         if ($product === null) {
-            return;
+            return $currency;
         }
 
         DB::table('providers')->where('id', $product->provider_id)->sharedLock()->get();
         DB::table('provider_plans')->where('id', $product->provider_plan_id)->sharedLock()->get();
         DB::table('provider_locations')->where('id', $price->provider_location_id)->sharedLock()->get();
+
+        return $currency;
     }
 
     /**

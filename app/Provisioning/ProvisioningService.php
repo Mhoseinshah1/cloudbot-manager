@@ -16,6 +16,7 @@ use App\Cloud\Enums\ProviderServerStatus;
 use App\Cloud\Exceptions\ProviderException;
 use App\Cloud\ProviderManager;
 use App\Enums\ConfirmedNoServerOutcome;
+use App\Enums\CredentialEvidence;
 use App\Enums\OrderStatus;
 use App\Enums\ProvisioningOutcome;
 use App\Enums\ProvisioningStage;
@@ -385,6 +386,12 @@ final readonly class ProvisioningService
             return $this->parkUncertain($order, 'The provider create did not complete cleanly.');
         }
 
+        // Written before anything else touches the database. The provider has
+        // acted and its answer is in memory; if this process ends here, this
+        // row is the only thing that will ever say whether the machine it built
+        // has a root password. No secret, just the shape of the answer.
+        $this->attempts->recordCreateResponse($attempt, $created);
+
         return $this->afterCreate($order, $plan, $provider, $attempt, $created);
     }
 
@@ -570,6 +577,16 @@ final readonly class ProvisioningService
         // Already delivered by somebody else. Its credential is on file and
         // rotating now would lock out a customer who has been given it.
         if (Server::query()->where('order_id', $order->getKey())->exists()) {
+            return null;
+        }
+
+        $evidence = $this->attempts->credentialEvidence($order);
+
+        if ($evidence === CredentialEvidence::KnownNone) {
+            // A create was durably observed to have issued no password. This
+            // machine authenticates some other way, so it is delivered exactly
+            // as it was built — and a provider that never issues one is not
+            // asked to reset something it does not have.
             return null;
         }
 

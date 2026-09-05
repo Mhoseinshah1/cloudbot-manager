@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Cloud\Data;
 
+use App\Cloud\Enums\ProviderCreateDisposition;
+
 /**
  * What a provider answered when asked to build a server.
  *
@@ -20,15 +22,25 @@ namespace App\Cloud\Data;
  * `servers.root_password_encrypted` is the single place a root password is ever
  * stored, and this type exists so it can get there.
  *
- * `rootCredential` is null for a provider that issues no password at create
- * time, and null for a repeat create that returned an existing server — a
- * one-time credential is issued once, and a provider replaying an earlier
- * result has none left to give.
+ * `rootCredential` is null in two unrelated situations, which is why the
+ * disposition is stated alongside it. A provider that issues no password at
+ * create time answers `Created` with null, and that is a complete fact about
+ * the machine. A repeat create that returned an existing server answers
+ * `Existing` with null, and that is not a fact about credentials at all — the
+ * original create may well have issued one. Nothing may read the second as the
+ * first.
  */
 final readonly class ProviderCreateResult
 {
     public function __construct(
         public ProviderServerData $server,
+        /**
+         * Whether this call built the server or found it already there.
+         *
+         * Load-bearing for recovery: only a `Created` answer says anything
+         * about what credential this machine has.
+         */
+        public ProviderCreateDisposition $disposition,
         /**
          * The one-time root password, when this response carried one.
          *
@@ -39,10 +51,48 @@ final readonly class ProviderCreateResult
         public ?SensitiveRootCredential $rootCredential = null,
     ) {}
 
-    /** A create that produced a server and no credential. */
+    /**
+     * A new server this call built, with the credential it issued, if any.
+     *
+     * A null credential here is a complete statement: this provider issues no
+     * root password.
+     */
+    public static function created(ProviderServerData $server, ?SensitiveRootCredential $credential = null): self
+    {
+        return new self($server, ProviderCreateDisposition::Created, $credential);
+    }
+
+    /**
+     * The server this token already had.
+     *
+     * Never carries a credential, and never implies the absence of one.
+     */
+    public static function existing(ProviderServerData $server): self
+    {
+        return new self($server, ProviderCreateDisposition::Existing);
+    }
+
+    /** A new server this call built, with no credential issued. */
     public static function withoutCredential(ProviderServerData $server): self
     {
-        return new self($server);
+        return self::created($server);
+    }
+
+    /** Whether this call built the server, as opposed to finding it. */
+    public function isNew(): bool
+    {
+        return $this->disposition === ProviderCreateDisposition::Created;
+    }
+
+    /**
+     * Whether this answer establishes that the machine has no root password.
+     *
+     * Only a create that actually built something can establish it. An
+     * `Existing` replay establishes nothing.
+     */
+    public function provesNoCredential(): bool
+    {
+        return $this->isNew() && ! $this->hasCredential();
     }
 
     public function hasCredential(): bool

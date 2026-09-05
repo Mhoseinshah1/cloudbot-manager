@@ -13,6 +13,7 @@ use App\Cloud\Enums\ProviderServerStatus;
 use App\Cloud\Exceptions\ProviderException;
 use App\Cloud\ProviderManager;
 use App\Enums\ConfirmedNoServerOutcome;
+use App\Enums\CredentialEvidence;
 use App\Enums\OrderStatus;
 use App\Enums\ProvisioningOutcome;
 use App\Enums\ProvisioningStage;
@@ -349,6 +350,19 @@ final readonly class ReconciliationService
         // Already delivered. Its credential is on file, and rotating now would
         // lock out a customer who has been given the one it replaces.
         if (Server::query()->where('order_id', $order->getKey())->exists()) {
+            return null;
+        }
+
+        $evidence = $this->attempts->credentialEvidence($order);
+
+        if ($evidence === CredentialEvidence::KnownNone) {
+            // A create was durably observed to have issued no password, so
+            // there is nothing to recover and nothing to rotate. Delivering
+            // this machine credential-free is what the create actually said.
+            //
+            // Note what is *not* being read here: the remote DTO. It carries no
+            // credential by construction, so its silence says nothing, and
+            // inferring "credentialless" from it would be inventing evidence.
             return null;
         }
 
