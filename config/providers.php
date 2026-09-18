@@ -1,6 +1,7 @@
 <?php
 
 use App\Cloud\Fake\FakeProvider;
+use App\Cloud\Hetzner\HetznerProvider;
 
 return [
 
@@ -17,14 +18,15 @@ return [
     | ProviderManager resolves from this list and refuses anything else, so
     | adding a provider is a deliberate, reviewed change to this file.
     |
-    | Hetzner is not listed: it has no implementation yet, and an entry
-    | pointing at a class that cannot provision would be a claim the system
-    | cannot honour.
+    | Both entries are real implementations. The simulator stays registered
+    | because the conformance suite runs the same contract against both, and a
+    | provider that only the tests can reach is a provider nothing verifies.
     |
     */
 
     'implementations' => [
         'fake' => FakeProvider::class,
+        'hetzner' => HetznerProvider::class,
     ],
 
 ];

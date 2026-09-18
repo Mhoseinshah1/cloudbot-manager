@@ -2,6 +2,9 @@
 
 namespace App\Providers;
 
+use App\Cloud\Hetzner\HetznerCredentialResolver;
+use App\Cloud\Hetzner\HetznerCredentials;
+
 use App\Auth\TwoFactor\TwoFactorSession;
 use Illuminate\Auth\Events\Logout;
 use Illuminate\Support\Facades\Event;
@@ -14,7 +17,10 @@ class AppServiceProvider extends ServiceProvider
      */
     public function register(): void
     {
-        //
+        // The Hetzner transport depends on the credential question, not on the
+        // answer, so the token stays in one class and a test can drive the
+        // adapter against a faked endpoint without a provider row.
+        $this->app->bind(HetznerCredentials::class, HetznerCredentialResolver::class);
     }
 
     /**
