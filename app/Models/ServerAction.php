@@ -38,6 +38,7 @@ use Illuminate\Database\Eloquent\Relations\BelongsTo;
  * @property \Illuminate\Support\Carbon|null $settled_at
  * @property int $attempts
  * @property \Illuminate\Support\Carbon|null $retry_after
+ * @property \Illuminate\Support\Carbon|null $provider_attempt_reserved_at
  * @property-read Server $server
  */
 class ServerAction extends Model
@@ -84,6 +85,7 @@ class ServerAction extends Model
             'requested_at' => 'datetime',
             'settled_at' => 'datetime',
             'retry_after' => 'datetime',
+            'provider_attempt_reserved_at' => 'datetime',
             'attempts' => 'integer',
         ];
     }

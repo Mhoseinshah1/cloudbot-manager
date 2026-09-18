@@ -139,6 +139,30 @@ return [
         // category but no retry-after time, so this is the policy rather than
         // something a provider told us.
         'retry_after_seconds' => (int) env('SERVER_ACTION_RETRY_AFTER_SECONDS', 120),
+
+        // How long a reserved provider write is left alone before the
+        // reconciler treats it as abandoned. The reservation is stamped before
+        // the call, so anything shorter than the provider timeout would let the
+        // reconciler park an operation that is simply still running. The
+        // effective grace is never below the provider timeout for that reason.
+        'in_flight_grace_seconds' => (int) env('SERVER_ACTION_IN_FLIGHT_GRACE_SECONDS', 300),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Telegram recovery
+    |--------------------------------------------------------------------------
+    |
+    | The webhook writes the update row and then queues the work, and those two
+    | cannot be one atomic step. A lost job leaves a row nothing ever looks at
+    | again, so a bounded sweep redispatches the ones old enough that their
+    | deliveries must be gone.
+    |
+    */
+
+    'telegram' => [
+        'recover_after_seconds' => (int) env('TELEGRAM_RECOVER_AFTER_SECONDS', 300),
+        'recover_batch' => 100,
     ],
 
     /*

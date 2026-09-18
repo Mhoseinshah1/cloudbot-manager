@@ -432,6 +432,25 @@ final readonly class ServerActionExecutor
         Server $server,
         CloudProviderInterface $provider,
     ): bool {
+        // RCH-007. A reservation whose outcome nobody has recorded may be a
+        // provider write that is still running. The server lock does not settle
+        // this: it is a Redis key with a TTL, and once that expires the
+        // reconciler can hold it while the original worker is still inside the
+        // call. Only the reservation timestamp says how long ago the write
+        // started.
+        if ($this->reservationIsInFlight($action)) {
+            Log::info('server_action.reservation_in_flight', [
+                'server_action_id' => $action->getKey(),
+                'action' => $action->action->value,
+                'attempts' => $action->attempts,
+            ]);
+
+            // Nothing at all: no retry, no parking, no exhaustion, no clearing.
+            // The worker that took the attempt still owns the right to record
+            // what happened.
+            return false;
+        }
+
         if ($this->settleFromRemoteState($action, $server, $provider)) {
             return false;
         }
@@ -467,6 +486,9 @@ final readonly class ServerActionExecutor
             // commits before the call precisely so a worker that dies inside
             // one has still spent it. Repeating a reboot or a delete on that
             // basis is exactly the guess this system does not make.
+            // Settling clears `provider_attempt_reserved_at` in the same
+            // statement, so an expired reservation does not linger as a fact
+            // about a write nobody is making any more.
             $this->actions->settle(
                 $action, ServerActionStatus::NeedsAttention, category: ProviderErrorCategory::UncertainResult,
             );
@@ -510,6 +532,55 @@ final readonly class ServerActionExecutor
      * Both are additionally bounded by the durable attempt budget and the
      * durable retry barrier, so neither can become a loop.
      */
+    /**
+     * Whether a provider write for this action may still be running.
+     *
+     * True only for the reserved-and-unresolved shape, and only while the
+     * reservation is young enough that the worker holding it could plausibly
+     * still be inside the call. An expired reservation is not evidence of
+     * anything — it becomes the uncertainty case, reconciled from remote fact
+     * where possible and parked where not.
+     *
+     * A legacy row reserved before this column existed has a null timestamp. It
+     * is deliberately *not* treated as in flight: waiting forever on a fact
+     * that will never arrive would leave it stuck. It falls through to the same
+     * conservative uncertainty handling, which never retries.
+     */
+    private function reservationIsInFlight(ServerAction $action): bool
+    {
+        if ($action->attempts < 1 || $action->provider_action_id !== null) {
+            return false;
+        }
+
+        if ($this->actions->lastCallIsKnownSafe($action)) {
+            // The call completed and changed nothing. Not in flight.
+            return false;
+        }
+
+        $reservedAt = $action->provider_attempt_reserved_at;
+
+        if ($reservedAt === null) {
+            return false;
+        }
+
+        return $reservedAt->copy()->addSeconds($this->inFlightGraceSeconds())->isFuture();
+    }
+
+    /**
+     * How long a reserved provider write is left alone.
+     *
+     * Never shorter than the provider timeout: the reservation is stamped
+     * before the call, so a grace below that would park operations that are
+     * merely slow.
+     */
+    private function inFlightGraceSeconds(): int
+    {
+        $grace = (int) $this->config->get('cloudbot.server_actions.in_flight_grace_seconds', 300);
+        $timeout = (int) $this->config->get('cloudbot.provisioning.provider_timeout_seconds', 120);
+
+        return max($grace, $timeout, 1);
+    }
+
     private function mayRedispatch(ServerAction $action): bool
     {
         if (! $action->mayAttemptNow() || $action->attempts >= $this->maximumAttempts()) {

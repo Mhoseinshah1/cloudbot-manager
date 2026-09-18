@@ -171,6 +171,11 @@ final readonly class ServerActionService
 
         $attributes['error_category'] = $category?->value;
 
+        // A durable outcome has been recorded, so no provider write is
+        // outstanding any more. Cleared in the same statement that records it,
+        // never as a separate step somebody can interleave.
+        $attributes['provider_attempt_reserved_at'] = null;
+
         $affected = ServerAction::query()
             ->whereKey($action->getKey())
             ->whereIn('status', [ServerActionStatus::Pending->value, ServerActionStatus::Running->value])
@@ -260,6 +265,11 @@ final readonly class ServerActionService
                 // is not yet known.
                 'error_category' => null,
                 'retry_after' => null,
+                // When this provider write started. The reconciler needs it:
+                // the reserved shape says a call may be outstanding, and only
+                // this says for how long, which is what separates "still
+                // running" from "the worker died".
+                'provider_attempt_reserved_at' => CarbonImmutable::now(),
                 'updated_at' => now(),
             ]) === 1;
     }
@@ -292,6 +302,9 @@ final readonly class ServerActionService
             ->update([
                 'retry_after' => CarbonImmutable::now()->addSeconds(max(1, $seconds)),
                 'error_category' => $category->value,
+                // The call completed and was refused safely: nothing is in
+                // flight.
+                'provider_attempt_reserved_at' => null,
                 'updated_at' => now(),
             ]) === 1;
     }
@@ -331,6 +344,9 @@ final readonly class ServerActionService
                 'error_category' => $category->value,
                 'retry_after' => CarbonImmutable::now()->addSeconds(max(1, $seconds)),
                 'settled_at' => null,
+                // The operation the provider accepted has ended, so the
+                // previous reservation is closed.
+                'provider_attempt_reserved_at' => null,
                 'updated_at' => now(),
             ]) === 1;
     }

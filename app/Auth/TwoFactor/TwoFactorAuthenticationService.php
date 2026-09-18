@@ -59,21 +59,57 @@ final class TwoFactorAuthenticationService
     /**
      * Complete enrolment if the code matches the pending secret.
      *
+     * Serialized on the administrator's own row. Two confirmations arriving
+     * together would otherwise both validate the pending secret, both generate
+     * a set of recovery codes and both save — last write wins, and whoever lost
+     * walks away holding eight codes that will never work. Single-use
+     * credentials cannot be decided by write order.
+     *
+     * The second caller finds enrolment already confirmed and is told so by the
+     * same null this returns for a wrong code: there is no way to show a set of
+     * plaintext codes again, and inventing one would mean keeping them readable.
+     *
      * @return list<string>|null The recovery codes, shown once, or null if the
-     *                           code was wrong.
+     *                           code was wrong or enrolment was already confirmed.
      */
     public function confirm(User $user, string $code): ?array
     {
-        if (! $this->verifyCode($user, $code)) {
-            return null;
+        $recoveryCodes = DB::transaction(function () use ($user, $code): ?array {
+            /** @var User|null $locked */
+            $locked = User::query()->whereKey($user->getKey())->lockForUpdate()->first();
+
+            if (! $locked instanceof User) {
+                return null;
+            }
+
+            if ($locked->two_factor_confirmed_at !== null) {
+                // Somebody already finished this enrolment. Confirming again
+                // would replace a live set of recovery codes with a new one and
+                // silently invalidate whatever the first caller was shown.
+                return null;
+            }
+
+            // Verified against the secret as it is now, inside the lock: a
+            // restarted enrolment issues a new secret, and the copy this
+            // request arrived with may be the previous one.
+            if (! $this->verifyCode($locked, $code)) {
+                return null;
+            }
+
+            $generated = $this->generateRecoveryCodes();
+
+            $locked->forceFill([
+                'two_factor_recovery_codes' => $generated,
+                'two_factor_confirmed_at' => now(),
+            ])->save();
+
+            return $generated;
+        });
+
+        if ($recoveryCodes !== null) {
+            // The caller's instance predates the confirmation.
+            $user->refresh();
         }
-
-        $recoveryCodes = $this->generateRecoveryCodes();
-
-        $user->forceFill([
-            'two_factor_recovery_codes' => $recoveryCodes,
-            'two_factor_confirmed_at' => now(),
-        ])->save();
 
         return $recoveryCodes;
     }

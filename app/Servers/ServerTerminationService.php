@@ -188,6 +188,8 @@ final readonly class ServerTerminationService
                 'status' => ServerActionStatus::Succeeded->value,
                 'settled_at' => CarbonImmutable::now(),
                 'error_category' => null,
+                // The delete is durably recorded; nothing is in flight.
+                'provider_attempt_reserved_at' => null,
                 'updated_at' => now(),
             ]);
     }

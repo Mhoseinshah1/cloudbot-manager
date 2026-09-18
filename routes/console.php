@@ -52,3 +52,12 @@ Schedule::command('server-actions:reconcile')
     ->everyFiveMinutes()
     ->withoutOverlapping()
     ->runInBackground();
+
+// The safety net under the Telegram webhook. The update row and the job that
+// handles it cannot be written atomically, so a lost delivery leaves a customer
+// pressing a button and getting silence. Every five minutes; the sweep only
+// queues work, it never talks to Telegram itself.
+Schedule::command('telegram:recover-updates')
+    ->everyFiveMinutes()
+    ->withoutOverlapping()
+    ->runInBackground();

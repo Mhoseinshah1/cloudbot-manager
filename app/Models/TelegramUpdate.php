@@ -31,6 +31,7 @@ use Illuminate\Database\Eloquent\Model;
  * @property TelegramUpdateStatus $status
  * @property \Illuminate\Support\Carbon $received_at
  * @property \Illuminate\Support\Carbon|null $processed_at
+ * @property \Illuminate\Support\Carbon|null $available_at
  * @property string|null $failure_reason
  * @property array<string, mixed>|null $metadata
  */
@@ -42,7 +43,7 @@ class TelegramUpdate extends Model
     protected $fillable = [
         'update_id', 'type', 'chat_type', 'telegram_user_id', 'telegram_chat_id',
         'message_id', 'callback_query_id', 'action', 'status', 'received_at',
-        'processed_at', 'failure_reason', 'metadata',
+        'processed_at', 'available_at', 'failure_reason', 'metadata',
     ];
 
     /**
@@ -70,6 +71,7 @@ class TelegramUpdate extends Model
             'message_id' => 'integer',
             'received_at' => 'datetime',
             'processed_at' => 'datetime',
+            'available_at' => 'datetime',
             'metadata' => 'array',
         ];
     }
@@ -78,6 +80,18 @@ class TelegramUpdate extends Model
     public function isPending(): bool
     {
         return $this->status->isPending();
+    }
+
+    /**
+     * Whether a worker may reach Telegram for this update right now.
+     *
+     * Durable and per update, not per queue delivery. A job already waiting in
+     * Redis when a 429 deadline was written has to honour it too; releasing the
+     * worker that received the refusal says nothing to that one.
+     */
+    public function mayProcessNow(): bool
+    {
+        return $this->available_at === null || ! $this->available_at->isFuture();
     }
 
     /**

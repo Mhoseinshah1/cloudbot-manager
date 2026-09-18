@@ -319,6 +319,7 @@ final readonly class BuyServerFlow
             'preview_price_toman' => $quote->sellingPriceToman,
             'preview_exchange_rate_id' => $quote->exchangeRateId,
             'preview_exchange_rate' => $quote->exchangeRate,
+            'preview_exchange_rate_currency' => $quote->providerCurrency,
             'preview_aup_version' => $aup,
             'preview_image_id' => $resolved,
         ]);
@@ -448,6 +449,7 @@ final readonly class BuyServerFlow
                 aupVersion: $version,
                 exchangeRateId: FlowState::intOf($state, 'preview_exchange_rate_id'),
                 exchangeRate: FlowState::stringOf($state, 'preview_exchange_rate'),
+                exchangeRateCurrency: FlowState::stringOf($state, 'preview_exchange_rate_currency'),
             ),
         );
 
