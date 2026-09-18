@@ -84,6 +84,15 @@ final class AuditEvent
 
     public const SubscriptionCreated = 'subscription.created';
 
+    /** A customer paid to extend one service period. */
+    public const SubscriptionRenewed = 'subscription.renewed';
+
+    /** A period ended and the renewal grace window opened. */
+    public const SubscriptionGraceEntered = 'subscription.grace_entered';
+
+    /** Grace ran out and deletion of the machine was requested. */
+    public const SubscriptionTerminationRequested = 'subscription.termination_requested';
+
     /*
      * Inventory drift. What the provider holds, against what we sold.
      */

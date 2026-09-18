@@ -45,4 +45,16 @@ final class OutboxTopic
 
     /** Local records and a provider's inventory disagree. */
     public const InventoryDiscrepancy = 'inventory.discrepancy';
+
+    /** A monthly service period is about to end. */
+    public const SubscriptionExpiryWarning = 'subscription.expiry_warning';
+
+    /** A period ended and the customer is inside the renewal grace window. */
+    public const SubscriptionGraceEntered = 'subscription.grace_entered';
+
+    /** What happens to the machine if grace runs out. Sent before deletion. */
+    public const SubscriptionTerminationWarning = 'subscription.termination_warning';
+
+    /** A customer paid to extend their service. */
+    public const SubscriptionRenewed = 'subscription.renewed';
 }

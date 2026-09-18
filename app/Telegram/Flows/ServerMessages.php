@@ -8,6 +8,9 @@ use App\Enums\ServerActionType;
 use App\Enums\ServerPowerState;
 use App\Enums\ServerStatus;
 use App\Models\Server;
+use App\Subscriptions\Data\RenewalQuote;
+use App\Subscriptions\Exceptions\RenewalNotAllowed;
+use Carbon\CarbonImmutable;
 use App\Servers\Exceptions\ServerActionNotAllowed;
 use App\Servers\Exceptions\ServerActionRefusal;
 
@@ -57,6 +60,93 @@ final class ServerMessages
     public const DELETE_EXPIRED = 'زمان تأیید حذف به پایان رسید. لطفاً دوباره از فهرست سرورها اقدام کنید.';
 
     public const DELETE_REQUESTED = 'درخواست حذف ثبت شد. پس از حذف شدن سرور، به شما اطلاع می‌دهیم.';
+
+    public const RENEW = 'تمدید سرویس';
+
+    public const RENEW_CONFIRM = 'بله، تمدید کن';
+
+    public const RENEW_EXPIRED = 'زمان تأیید تمدید به پایان رسید. لطفاً دوباره از فهرست سرورها اقدام کنید.';
+
+    /**
+     * One renewal offer.
+     *
+     * States the figure and the date it buys, because those are the two things
+     * a customer is agreeing to. The price shown here is not what gets charged:
+     * the amount is taken again from a fresh quote when they confirm, and a
+     * change sends them back here rather than through.
+     */
+    public static function renewOffer(RenewalQuote $quote): string
+    {
+        $lines = [
+            'تمدید سرویس سرور',
+            '',
+            'نام سرور: '.$quote->serverName,
+            'پایان فعلی سرویس: '.self::moment($quote->currentPeriodEnd),
+            'مبلغ تمدید: '.number_format($quote->priceToman).' تومان',
+            'پایان سرویس پس از تمدید: '.self::moment($quote->newPeriodEnd),
+        ];
+
+        if ($quote->inGrace && $quote->graceUntil !== null) {
+            $lines[] = '';
+            $lines[] = '⚠️ سرویس شما منقضی شده و در مهلت تمدید است.';
+            $lines[] = 'مهلت تمدید تا: '.self::moment($quote->graceUntil);
+        }
+
+        return implode("\n", $lines);
+    }
+
+    /** The price moved between the offer and the confirmation. */
+    public static function renewPriceChanged(RenewalQuote $quote): string
+    {
+        return implode("\n", [
+            'مبلغ تمدید تغییر کرده است.',
+            '',
+            'مبلغ جدید: '.number_format($quote->priceToman).' تومان',
+            'پایان سرویس پس از تمدید: '.self::moment($quote->newPeriodEnd),
+            '',
+            'برای ادامه، مبلغ جدید را تأیید کنید.',
+        ]);
+    }
+
+    public static function renewed(RenewalQuote $quote): string
+    {
+        return implode("\n", [
+            'سرویس شما تمدید شد.',
+            '',
+            'نام سرور: '.$quote->serverName,
+            'مبلغ پرداخت‌شده: '.number_format($quote->priceToman).' تومان',
+            'پایان سرویس جدید: '.self::moment($quote->newPeriodEnd),
+        ]);
+    }
+
+    /**
+     * Why a renewal was refused, in the customer's words.
+     *
+     * Chosen from the stable reason code rather than the exception message: the
+     * message is for an operator reading a log, and it names amounts and states
+     * a customer has no use for.
+     */
+    public static function renewRefusal(RenewalNotAllowed $refused): string
+    {
+        return match ($refused->reason) {
+            'insufficient_funds' => 'موجودی کیف پول شما برای تمدید کافی نیست. لطفاً ابتدا کیف پول را شارژ کنید.',
+            'not_renewable' => 'این سرویس در وضعیت فعلی قابل تمدید نیست.',
+            'not_monthly' => 'تمدید تنها برای سرویس‌های ماهانه امکان‌پذیر است.',
+            'server_gone' => 'سرور این سرویس دیگر در دسترس نیست.',
+            'termination_in_progress' => 'حذف این سرور آغاز شده و امکان تمدید وجود ندارد. لطفاً با پشتیبانی تماس بگیرید.',
+            'inactive_customer' => 'حساب شما اجازه انجام این عملیات را ندارد.',
+            'price_unavailable' => 'تمدید این سرویس در حال حاضر ممکن نیست. لطفاً بعداً دوباره تلاش کنید.',
+            default => 'تمدید این سرویس در حال حاضر ممکن نیست.',
+        };
+    }
+
+    /** Display only. Storage and every comparison stay UTC. */
+    private static function moment(CarbonImmutable $instant): string
+    {
+        return $instant
+            ->setTimezone((string) config('cloudbot.customer_timezone', 'UTC'))
+            ->format('Y-m-d H:i');
+    }
 
     public static function summary(Server $server): string
     {

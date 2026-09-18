@@ -104,16 +104,48 @@ enum SettingKey: string
      */
     case AntiAbusePurchaseWindowMinutes = 'anti_abuse.purchase_window_minutes';
 
+    /**
+     * How many days before expiry a customer is warned, as a list of days.
+     *
+     * A list rather than one number because a customer needs time to notice
+     * and time to act, and those are not the same reminder. Absent or
+     * malformed means no warning is sent — never a default invented here,
+     * because a warning schedule nobody chose is a promise nobody made.
+     */
+    case MonthlyExpiryWarningDays = 'billing.monthly_expiry_warning_days';
+
+    /**
+     * How long after expiry a customer may still renew before termination.
+     *
+     * Measured from the authoritative period end, never from when a sweep
+     * happened to run. Absent or malformed means no grace is granted and the
+     * subscription is held rather than terminated.
+     */
+    case MonthlyGraceHours = 'billing.monthly_grace_hours';
+
+    /**
+     * Whether an expired server is deleted automatically after grace.
+     *
+     * Absent or malformed is read as "no" by the lifecycle, because the
+     * failure mode of not deleting is a bill, and the failure mode of deleting
+     * is somebody's data.
+     */
+    case AutoTerminateExpiredServers = 'billing.auto_terminate_expired_servers';
+
     public function type(): SettingType
     {
         return match ($this) {
-            self::SalesEnabled, self::ProvisioningEnabled => SettingType::Boolean,
+            self::SalesEnabled,
+            self::ProvisioningEnabled,
+            self::AutoTerminateExpiredServers => SettingType::Boolean,
             self::FxMaxAgeMinutes,
             self::ProvisioningStuckAfterMinutes,
             self::AntiAbuseMaxActiveServers,
             self::AntiAbusePurchaseLimitCount,
-            self::AntiAbusePurchaseWindowMinutes => SettingType::Integer,
+            self::AntiAbusePurchaseWindowMinutes,
+            self::MonthlyGraceHours => SettingType::Integer,
             self::AupCurrentVersion => SettingType::String,
+            self::MonthlyExpiryWarningDays => SettingType::Json,
         };
     }
 

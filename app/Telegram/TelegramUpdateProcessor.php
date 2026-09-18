@@ -184,6 +184,8 @@ final readonly class TelegramUpdateProcessor
             ),
             TelegramAction::ServerDelete => $this->servers->confirmDelete($context, (int) $id),
             TelegramAction::ServerDeleteConfirm => $this->deleteStep($context, $update),
+            TelegramAction::ServerRenew => $this->servers->offerRenewal($context, (int) $id),
+            TelegramAction::ServerRenewConfirm => $this->renewStep($context),
             TelegramAction::WalletPage => $this->wallet->show($context, $context->page()),
             TelegramAction::InvoicePage => $this->invoices->list($context, $context->page()),
             TelegramAction::InvoiceView => $this->invoices->view($context, (int) $id),
@@ -214,6 +216,31 @@ final readonly class TelegramUpdateProcessor
         }
 
         $this->servers->delete($context, $state, $update->update_id);
+    }
+
+    /**
+     * The confirmation that spends money.
+     *
+     * Same shape as the delete confirmation and for the same reason: the
+     * subscription and the price the customer was shown come from the intent
+     * this system wrote, not from the button. A token that does not match a
+     * live intent charges nobody.
+     */
+    private function renewStep(FlowContext $context): void
+    {
+        $state = $this->flows->matching(
+            $context->telegramUserId,
+            FlowState::SERVER_RENEW,
+            $context->flowToken(),
+        );
+
+        if ($state === null) {
+            $this->telegram->sendMessage($context->chatId, ServerMessages::RENEW_EXPIRED, MainMenu::keyboard());
+
+            return;
+        }
+
+        $this->servers->confirmRenewal($context, $state);
     }
 
     /**

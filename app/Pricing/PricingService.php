@@ -54,11 +54,44 @@ final readonly class PricingService
      */
     public function quoteNewSale(ProductLocationPrice $locationPrice, ?DateTimeInterface $at = null): PriceQuote
     {
+        $this->assertSalesEnabled();
+
+        return $this->quote($locationPrice, $at);
+    }
+
+    /**
+     * Price one renewal of a service a customer already has.
+     *
+     * Every safety check a new sale makes still applies: the catalog rows must
+     * belong together, the provider and plan must be enabled, the location must
+     * be usable, the provider cost must exist and the rate must be fresh. A
+     * renewal priced against a missing cost or a stale rate is exactly as wrong
+     * as a sale priced that way.
+     *
+     * The one check deliberately not made is the new-sales kill switch. It
+     * stops the shop taking on new customers — during an incident, a provider
+     * outage, a price review — and reading it as "existing customers may not
+     * pay to keep their servers" would delete machines people are trying to pay
+     * for. Turning off new sales is a commercial decision; ending live service
+     * is a different one, and nobody has made it by flipping that switch.
+     *
+     * @throws SaleNotAvailable when this renewal must not be priced.
+     */
+    public function quoteRenewal(ProductLocationPrice $locationPrice, ?DateTimeInterface $at = null): PriceQuote
+    {
+        return $this->quote($locationPrice, $at);
+    }
+
+    /**
+     * The pricing itself, shared by both.
+     *
+     * @throws SaleNotAvailable
+     */
+    private function quote(ProductLocationPrice $locationPrice, ?DateTimeInterface $at = null): PriceQuote
+    {
         // Immutable: the moment this decision was made is a fact about the
         // quote, and nothing downstream may move it.
         $evaluatedAt = ExchangeRateService::instant($at);
-
-        $this->assertSalesEnabled();
 
         // Loaded fresh rather than trusting whatever the caller happened to
         // have in memory. A quote decides whether to take money; it reads the

@@ -75,6 +75,19 @@ final readonly class OutboxWriter
         }
     }
 
+    /**
+     * Whether an intent with this key has already been recorded.
+     *
+     * For the one case that needs to check before acting rather than simply
+     * write: a customer must have been warned before their server is deleted,
+     * and the durable record of having warned them is the only acceptable
+     * proof. "We probably sent it" is not one.
+     */
+    public function exists(string $deduplicationKey): bool
+    {
+        return $this->find($deduplicationKey) instanceof OutboxMessage;
+    }
+
     private function find(string $deduplicationKey): ?OutboxMessage
     {
         $message = OutboxMessage::query()->where('deduplication_key', $deduplicationKey)->first();

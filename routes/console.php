@@ -61,3 +61,13 @@ Schedule::command('telegram:recover-updates')
     ->everyFiveMinutes()
     ->withoutOverlapping()
     ->runInBackground();
+
+// The monthly service lifecycle: warn, grace, and eventually terminate. Every
+// five minutes, because a customer warned three days before expiry should be
+// warned at roughly the right time, and a grace window that closed should not
+// sit unacted on for an hour. It charges nobody — renewal is the customer's
+// decision — and it only ever queues provider work for the worker built to wait.
+Schedule::command('subscriptions:process-expiry')
+    ->everyFiveMinutes()
+    ->withoutOverlapping()
+    ->runInBackground();

@@ -13,6 +13,7 @@ use App\Enums\SubscriptionStatus;
 use App\Models\Server;
 use App\Models\ServerAction;
 use App\Models\Subscription;
+use App\Subscriptions\MonthlyLifecycleService;
 use App\Models\User;
 use App\Outbox\OutboxTopic;
 use App\Outbox\OutboxWriter;
@@ -99,7 +100,7 @@ final readonly class ServerTerminationService
             ])->save();
 
             if ($subscription instanceof Subscription) {
-                $this->endEntitlement($subscription, $endedAt);
+                $this->endEntitlement($subscription, $endedAt, self::isExpiryDeletion($current));
             }
 
             $this->settleQuietly($current);
@@ -141,6 +142,22 @@ final readonly class ServerTerminationService
         });
     }
 
+    /**
+     * Whether this deletion was the lifecycle ending an expired service.
+     *
+     * Read from an explicit reason the lifecycle wrote into the action, not
+     * inferred from `actor_type`: other system deletes exist and may exist
+     * later, and lumping them together would terminate subscriptions that were
+     * only ever cancelled.
+     */
+    private static function isExpiryDeletion(ServerAction $action): bool
+    {
+        $metadata = $action->metadata ?? [];
+
+        return is_array($metadata)
+            && ($metadata['reason'] ?? null) === MonthlyLifecycleService::REASON_EXPIRED;
+    }
+
     /** One farewell per server, however many workers reach the end. */
     public static function terminationKey(Server $server): string
     {
@@ -156,12 +173,32 @@ final readonly class ServerTerminationService
      * brought forward: a deletion cannot extend anybody's period, and a period
      * that already ended is not reopened.
      */
-    private function endEntitlement(Subscription $subscription, CarbonImmutable $endedAt): void
-    {
-        $attributes = [
-            'status' => SubscriptionStatus::Cancelled->value,
-            'cancelled_at' => $endedAt,
-        ];
+    private function endEntitlement(
+        Subscription $subscription,
+        CarbonImmutable $endedAt,
+        bool $expired = false,
+    ): void {
+        // Two different endings, and the difference is visible to the customer
+        // and to anybody reading the history. A customer who deleted their own
+        // server cancelled a service they were entitled to; a service deleted
+        // because it ran out ended on its own terms. Recording both as
+        // `cancelled` would say every expiry was somebody's decision to quit.
+        $attributes = $expired
+            ? ['status' => SubscriptionStatus::Terminated->value]
+            : ['status' => SubscriptionStatus::Cancelled->value, 'cancelled_at' => $endedAt];
+
+        // Grace is over either way: the machine is gone.
+        $attributes['grace_until'] = null;
+
+        if ($expired) {
+            // The period already ended — that is why this deletion happened —
+            // so the authoritative expiry stays exactly where it was. Moving it
+            // to the deletion time would rewrite what the customer was owed
+            // into what the sweep happened to do.
+            $subscription->forceFill($attributes)->save();
+
+            return;
+        }
 
         if ($subscription->current_period_end->greaterThan($endedAt)) {
             // Never before the period began. A customer who deletes a machine

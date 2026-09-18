@@ -9,7 +9,14 @@ use App\Audit\AuditRecorder;
 use App\Cloud\Enums\ProviderCapability;
 use App\Enums\ServerActionType;
 use App\Jobs\DeleteTelegramMessageJob;
+use App\Enums\BillingMode;
+use App\Enums\ServerStatus;
 use App\Models\Server;
+use App\Models\Subscription;
+use App\Subscriptions\Data\RenewalQuote;
+use App\Subscriptions\Exceptions\RenewalNotAllowed;
+use App\Subscriptions\MonthlyLifecycleService;
+use App\Subscriptions\SubscriptionRenewalService;
 use App\Models\ServerAction;
 use App\Notifications\CustomerMessages;
 use App\Servers\Exceptions\ServerActionNotAllowed;
@@ -51,6 +58,8 @@ final readonly class ServerManagementFlow
         private FlowState $state,
         private AuditRecorder $audit,
         private Config $config,
+        private SubscriptionRenewalService $renewals,
+        private MonthlyLifecycleService $lifecycle,
     ) {}
 
     public function list(FlowContext $context, int $page = 1): void
@@ -249,6 +258,183 @@ final readonly class ServerManagementFlow
     }
 
     /**
+     * Offer a renewal. Charges nothing.
+     *
+     * The price is quoted fresh here and quoted fresh again when the customer
+     * confirms. What the intent token carries is the figure they were shown, so
+     * the confirmation can notice it has moved and ask again rather than debit
+     * a wallet for a number nobody agreed to.
+     */
+    public function offerRenewal(FlowContext $context, int $serverId): void
+    {
+        $server = $this->servers->find($context->customer, $serverId);
+
+        if (! $server instanceof Server) {
+            $this->notFound($context);
+
+            return;
+        }
+
+        $subscription = Subscription::query()->where('server_id', $server->getKey())->first();
+
+        if (! $subscription instanceof Subscription) {
+            $this->notFound($context);
+
+            return;
+        }
+
+        try {
+            $quote = $this->renewals->quote($context->customer, $subscription);
+        } catch (RenewalNotAllowed $refused) {
+            $this->refuseRenewal($context, $refused, (int) $server->getKey());
+
+            return;
+        }
+
+        $token = $this->state->begin($context->telegramUserId, FlowState::SERVER_RENEW, [
+            'subscription_id' => $quote->subscriptionId,
+            // What the customer is looking at. Compared, never trusted as the
+            // amount to charge.
+            'quoted_price_toman' => $quote->priceToman,
+        ]);
+
+        $this->telegram->sendMessage($context->chatId, ServerMessages::renewOffer($quote), [
+            'inline_keyboard' => [
+                [['text' => ServerMessages::RENEW_CONFIRM, 'callback_data' => CallbackGrammar::serverRenewConfirm($token)]],
+                [['text' => ServerMessages::KEEP, 'callback_data' => CallbackGrammar::serverView((int) $server->getKey())]],
+            ],
+        ]);
+    }
+
+    /**
+     * The confirmation. The only place in this flow that spends money.
+     *
+     * Everything is established again from the database: the subscription comes
+     * from the intent this system wrote, ownership is re-checked inside the
+     * renewal service, and the amount comes from a fresh quote taken under the
+     * subscription's lock. The callback carries a token and nothing else, which
+     * is the point — a price, a subscription id or a period in callback data
+     * would be a customer naming their own terms.
+     *
+     * @param  array<string, scalar|null>  $state  Already matched against the token.
+     */
+    public function confirmRenewal(FlowContext $context, array $state): void
+    {
+        $subscriptionId = FlowState::intOf($state, 'subscription_id');
+
+        if ($subscriptionId === null) {
+            $this->telegram->sendMessage($context->chatId, ServerMessages::RENEW_EXPIRED, [
+                'inline_keyboard' => [[BuyMessages::mainMenuButton()]],
+            ]);
+
+            return;
+        }
+
+        $subscription = Subscription::query()->whereKey($subscriptionId)->first();
+
+        if (! $subscription instanceof Subscription) {
+            $this->notFound($context);
+
+            return;
+        }
+
+        $shown = FlowState::intOf($state, 'quoted_price_toman');
+
+        try {
+            $this->renewals->renew($context->customer, $subscription, $shown);
+        } catch (RenewalNotAllowed $refused) {
+            if ($refused->reason === 'price_changed') {
+                // Re-offered rather than refused outright: the customer still
+                // wants to renew, they simply have not seen this figure.
+                $this->reofferRenewal($context, $subscription);
+
+                return;
+            }
+
+            $this->refuseRenewal($context, $refused, (int) $subscription->server_id);
+
+            return;
+        }
+
+        // Spent. A second confirmation from the same keyboard finds no live
+        // intent, and the renewal's own durable key would refuse it anyway.
+        $this->state->forget($context->telegramUserId);
+
+        $renewed = $subscription->fresh();
+
+        if ($renewed instanceof Subscription) {
+            // After the renewal has committed, never inside it. A machine that
+            // will not start is an operational problem; the customer has paid
+            // and owns the period either way.
+            $this->lifecycle->requestPowerOnAfterRenewal($renewed);
+
+            try {
+                $quote = $this->renewals->quote($context->customer, $renewed);
+
+                $this->telegram->sendMessage($context->chatId, ServerMessages::renewed(new RenewalQuote(
+                    subscriptionId: $quote->subscriptionId,
+                    serverId: $quote->serverId,
+                    serverName: $quote->serverName,
+                    currentPeriodEnd: $quote->currentPeriodEnd,
+                    newPeriodEnd: $quote->currentPeriodEnd,
+                    priceToman: (int) $renewed->price_toman,
+                    inGrace: false,
+                    graceUntil: null,
+                    quote: $quote->quote,
+                )), ['inline_keyboard' => [
+                    [['text' => ServerMessages::BACK, 'callback_data' => CallbackGrammar::serverView((int) $subscription->server_id)]],
+                    [BuyMessages::mainMenuButton()],
+                ]]);
+
+                return;
+            } catch (RenewalNotAllowed) {
+                // The renewal succeeded; only the re-quote for the receipt did
+                // not. The outbox notification already carries the facts, so
+                // this falls through to a plain confirmation rather than
+                // telling a paying customer something went wrong.
+            }
+        }
+
+        $this->telegram->sendMessage($context->chatId, ServerMessages::RENEW_CONFIRM, [
+            'inline_keyboard' => [[BuyMessages::mainMenuButton()]],
+        ]);
+    }
+
+    /** Show the moved price and ask again. */
+    private function reofferRenewal(FlowContext $context, Subscription $subscription): void
+    {
+        try {
+            $quote = $this->renewals->quote($context->customer, $subscription);
+        } catch (RenewalNotAllowed $refused) {
+            $this->refuseRenewal($context, $refused, (int) $subscription->server_id);
+
+            return;
+        }
+
+        $token = $this->state->begin($context->telegramUserId, FlowState::SERVER_RENEW, [
+            'subscription_id' => $quote->subscriptionId,
+            'quoted_price_toman' => $quote->priceToman,
+        ]);
+
+        $this->telegram->sendMessage($context->chatId, ServerMessages::renewPriceChanged($quote), [
+            'inline_keyboard' => [
+                [['text' => ServerMessages::RENEW_CONFIRM, 'callback_data' => CallbackGrammar::serverRenewConfirm($token)]],
+                [['text' => ServerMessages::KEEP, 'callback_data' => CallbackGrammar::serverView($quote->serverId)]],
+            ],
+        ]);
+    }
+
+    private function refuseRenewal(FlowContext $context, RenewalNotAllowed $refused, int $serverId): void
+    {
+        $this->telegram->sendMessage($context->chatId, ServerMessages::renewRefusal($refused), [
+            'inline_keyboard' => [
+                [['text' => ServerMessages::BACK, 'callback_data' => CallbackGrammar::serverView($serverId)]],
+                [BuyMessages::mainMenuButton()],
+            ],
+        ]);
+    }
+
+    /**
      * Show the root password, once, in a message of its own.
      *
      * Read straight from the encrypted column at the moment of sending, and put
@@ -359,6 +545,18 @@ final readonly class ServerManagementFlow
 
         if ($live && $server->root_password_encrypted !== null) {
             $rows[] = [['text' => ServerMessages::PASSWORD, 'callback_data' => CallbackGrammar::serverRevealPassword($id)]];
+        }
+
+        // Offered only where the subscription can actually take the money: a
+        // renew button on a cancelled or terminated service is a promise the
+        // next screen has to break.
+        $subscription = Subscription::query()->where('server_id', $id)->first();
+
+        if ($subscription instanceof Subscription
+            && $subscription->status->isRenewable()
+            && $subscription->billing_mode === BillingMode::Monthly
+            && $server->status !== ServerStatus::Terminated) {
+            $rows[] = [['text' => ServerMessages::RENEW, 'callback_data' => CallbackGrammar::serverRenew($id)]];
         }
 
         if ($live) {

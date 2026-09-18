@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Notifications;
 
+use Carbon\CarbonImmutable;
+
 /**
  * What a customer is told when something happens to their order or server.
  *
@@ -100,6 +102,111 @@ final class CustomerMessages
             'این پیام تا حدود '.$visibleSeconds.' ثانیه دیگر حذف می‌شود.',
             'لطفاً همین حالا آن را در جای امنی ذخیره و پس از ورود، تغییرش دهید.',
         ]);
+    }
+
+    /**
+     * A monthly period is about to end.
+     *
+     * @param  array<string, mixed>  $facts
+     */
+    public static function subscriptionExpiryWarning(array $facts): string
+    {
+        return implode("\n", [
+            'سرویس سرور شما به‌زودی به پایان می‌رسد.',
+            '',
+            'نام سرور: '.self::text($facts, 'server_name'),
+            'زمان پایان: '.self::moment($facts, 'expires_at'),
+            'زمان باقی‌مانده: '.self::days($facts, 'days_left'),
+            '',
+            'برای ادامه سرویس، از بخش «سرورهای من» گزینه تمدید را انتخاب کنید.',
+        ]);
+    }
+
+    /**
+     * The period ended, and the machine is still recoverable.
+     *
+     * @param  array<string, mixed>  $facts
+     */
+    public static function subscriptionGraceEntered(array $facts): string
+    {
+        return implode("\n", [
+            'سرویس سرور شما به پایان رسید.',
+            '',
+            'نام سرور: '.self::text($facts, 'server_name'),
+            'پایان سرویس: '.self::moment($facts, 'expired_at'),
+            'مهلت تمدید تا: '.self::moment($facts, 'grace_until'),
+            '',
+            'ممکن است سرور شما خاموش شده باشد. تا پایان مهلت بالا امکان تمدید و بازگشت سرویس وجود دارد.',
+        ]);
+    }
+
+    /**
+     * What happens if the grace window closes. Sent before anything is deleted.
+     *
+     * @param  array<string, mixed>  $facts
+     */
+    public static function subscriptionTerminationWarning(array $facts): string
+    {
+        return implode("\n", [
+            '⚠️ هشدار حذف سرور',
+            '',
+            'نام سرور: '.self::text($facts, 'server_name'),
+            'مهلت تمدید تا: '.self::moment($facts, 'grace_until'),
+            '',
+            'در صورت عدم تمدید تا زمان بالا، سرور و تمام اطلاعات آن برای همیشه حذف خواهد شد و قابل بازگردانی نیست.',
+            'برای جلوگیری از حذف، از بخش «سرورهای من» سرویس را تمدید کنید.',
+        ]);
+    }
+
+    /**
+     * @param  array<string, mixed>  $facts
+     */
+    public static function subscriptionRenewed(array $facts): string
+    {
+        return implode("\n", [
+            'سرویس سرور شما تمدید شد.',
+            '',
+            'نام سرور: '.self::text($facts, 'server_name'),
+            'مبلغ: '.self::money($facts, 'amount_toman'),
+            'پایان سرویس جدید: '.self::moment($facts, 'new_period_end'),
+        ]);
+    }
+
+    /**
+     * An instant, shown in the customer's timezone.
+     *
+     * Storage and every comparison stay UTC; this is display only. A customer
+     * told their server expires at 20:30 needs that to be 20:30 where they are,
+     * or the warning is worse than none.
+     *
+     * @param  array<string, mixed>  $facts
+     */
+    private static function moment(array $facts, string $key): string
+    {
+        $value = $facts[$key] ?? null;
+
+        if (! is_string($value) || $value === '') {
+            return '—';
+        }
+
+        try {
+            $instant = CarbonImmutable::parse($value)
+                ->setTimezone((string) config('cloudbot.customer_timezone', 'UTC'));
+        } catch (\Throwable) {
+            return '—';
+        }
+
+        return $instant->format('Y-m-d H:i');
+    }
+
+    /**
+     * @param  array<string, mixed>  $facts
+     */
+    private static function days(array $facts, string $key): string
+    {
+        $value = $facts[$key] ?? null;
+
+        return is_int($value) && $value > 0 ? $value.' روز' : '—';
     }
 
     /**

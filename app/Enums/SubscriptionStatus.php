@@ -41,7 +41,14 @@ enum SubscriptionStatus: string
      */
     public function isRenewable(): bool
     {
-        return $this === self::Active;
+        // Grace exists precisely so an expired customer can still pay. Leaving
+        // it out would make the grace period a countdown to deletion with no
+        // way to stop it, which is the opposite of what it is for.
+        //
+        // Cancelled and Terminated are over. NeedsAttention means nobody knows
+        // what is true of this service yet, and charging for a period whose
+        // machine may not exist is the mistake that state exists to prevent.
+        return $this === self::Active || $this === self::Grace;
     }
 
     /**

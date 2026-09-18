@@ -17,6 +17,9 @@ enum InvoiceType: string
     /** A customer bought a server, paid from their wallet balance. */
     case ServerPurchase = 'server_purchase';
 
+    /** One more service period bought for a server the customer already has. */
+    case ServerRenewal = 'server_renewal';
+
     /**
      * @return list<string>
      */
