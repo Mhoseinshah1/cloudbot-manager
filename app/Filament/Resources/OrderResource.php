@@ -6,6 +6,7 @@ namespace App\Filament\Resources;
 
 use App\Audit\AuditEvent;
 use App\Audit\AuditRecorder;
+use App\Enums\ConfirmedNoServerOutcome;
 use App\Enums\OrderStatus;
 use App\Enums\Permission;
 use App\Filament\Resources\OrderResource\Pages;
@@ -13,9 +14,9 @@ use App\Filament\Support\AuthorizesWithPermission;
 use App\Jobs\ProvisionOrderJob;
 use App\Models\Order;
 use App\Models\User;
-use App\Enums\ConfirmedNoServerOutcome;
 use App\Orders\RefundService;
 use App\Provisioning\ReconciliationService;
+use Filament\Actions\MountableAction;
 use Filament\Forms\Components\Placeholder;
 use Filament\Forms\Components\Select;
 use Filament\Forms\Components\Textarea;
@@ -97,16 +98,16 @@ class OrderResource extends Resource
             ])
             ->actions([
                 Tables\Actions\ViewAction::make(),
-                self::reconcileAction(),
-                self::retryAction(),
-                self::refundAction(),
+                self::reconcileAction(Tables\Actions\Action::class),
+                self::retryAction(Tables\Actions\Action::class),
+                self::refundAction(Tables\Actions\Action::class),
             ])
             ->bulkActions([])
             ->defaultSort('id', 'desc');
     }
 
     /**
-     * @return array<string, class-string>
+     * @return array<string, \Filament\Resources\Pages\PageRegistration>
      */
     public static function getPages(): array
     {
@@ -123,10 +124,15 @@ class OrderResource extends Resource
      * asserting them, and the same code the scheduled sweep runs. It can settle
      * an order as provisioned or park it, and never marks one successful on an
      * operator's say-so.
+     *
+     * @template TAction of MountableAction
+     *
+     * @param  class-string<TAction>  $actionClass
+     * @return TAction
      */
-    public static function reconcileAction(): Tables\Actions\Action
+    public static function reconcileAction(string $actionClass): MountableAction
     {
-        return Tables\Actions\Action::make('forceReconcile')
+        return $actionClass::make('forceReconcile')
             ->label('Force reconcile')
             ->icon('heroicon-o-arrow-path')
             ->color('warning')
@@ -178,10 +184,15 @@ class OrderResource extends Resource
      * request. Nothing is reset: the durable attempt budget still applies, and
      * the order keeps the provisioning token it committed to before its first
      * create — a new token would be a second machine.
+     *
+     * @template TAction of MountableAction
+     *
+     * @param  class-string<TAction>  $actionClass
+     * @return TAction
      */
-    public static function retryAction(): Tables\Actions\Action
+    public static function retryAction(string $actionClass): MountableAction
     {
-        return Tables\Actions\Action::make('retryProvisioning')
+        return $actionClass::make('retryProvisioning')
             ->label('Retry provisioning')
             ->icon('heroicon-o-play')
             ->color('primary')
@@ -233,10 +244,15 @@ class OrderResource extends Resource
      * The operator states which confirmed outcome they are asserting — there is
      * deliberately no option meaning "probably", because an uncertain provider
      * state must be reconciled before anybody is refunded.
+     *
+     * @template TAction of MountableAction
+     *
+     * @param  class-string<TAction>  $actionClass
+     * @return TAction
      */
-    public static function refundAction(): Tables\Actions\Action
+    public static function refundAction(string $actionClass): MountableAction
     {
-        return Tables\Actions\Action::make('refund')
+        return $actionClass::make('refund')
             ->label('Refund')
             ->icon('heroicon-o-receipt-refund')
             ->color('danger')

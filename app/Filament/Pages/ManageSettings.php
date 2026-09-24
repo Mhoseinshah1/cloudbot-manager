@@ -83,7 +83,9 @@ class ManageSettings extends Page implements HasForms
             };
         }
 
-        $this->form->fill($values);
+        // `getForm()` rather than the magic `$this->form` property, so the
+        // registered form is resolved through the typed accessor.
+        $this->getForm('form')?->fill($values);
     }
 
     public function form(Form $form): Form
@@ -125,7 +127,13 @@ class ManageSettings extends Page implements HasForms
             return;
         }
 
-        $state = $this->form->getState();
+        $form = $this->getForm('form');
+
+        if (! $form instanceof Form) {
+            return;
+        }
+
+        $state = $form->getState();
         $settings = app(SettingsService::class);
         $saved = 0;
 
@@ -175,6 +183,8 @@ class ManageSettings extends Page implements HasForms
      * `SettingsService::set()` refuses a mismatch rather than coercing, because
      * the coercions PHP would apply are the dangerous ones — "false" is a
      * non-empty string and therefore truthy.
+     *
+     * @return bool|int|string|list<int>
      */
     private static function coerce(SettingKey $key, mixed $value): bool|int|string|array
     {

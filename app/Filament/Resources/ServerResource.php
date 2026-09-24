@@ -104,7 +104,7 @@ class ServerResource extends Resource
     }
 
     /**
-     * @return array<string, class-string>
+     * @return array<string, \Filament\Resources\Pages\PageRegistration>
      */
     public static function getPages(): array
     {
@@ -142,7 +142,7 @@ class ServerResource extends Resource
             ])
             ->visible(fn (Server $record): bool => self::operatorMay(Permission::ServersManage)
                 && $record->status !== ServerStatus::Terminated)
-            ->action(function (Server $record, array $data) use ($action): void {
+            ->action(function (Server $record, array $data) use ($action, $label): void {
                 $operator = self::operator();
 
                 if (! $operator instanceof User) {

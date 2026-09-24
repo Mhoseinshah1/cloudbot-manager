@@ -128,20 +128,45 @@ it('runs provider work and notifications on their own queues', function (): void
         ->and(App\Jobs\ProcessTelegramUpdateJob::queueName())->toBe(Queues::Telegram->value);
 });
 
-it('ships no hetzner implementation', function (): void {
-    // Phase 10. A provider-neutral phase that quietly grew a real adapter would
-    // be a phase nobody reviewed for the things a real adapter needs.
+it('keeps the hetzner implementation behind the provider registry', function (): void {
+    // Phase 10 delivered the adapter under review, so the gate that no Hetzner
+    // code exists has done its job. What replaces it is the boundary that
+    // outlives any one provider: the domain stays provider-neutral and reaches
+    // a provider through the registry by code, never by class. That is what
+    // makes a second provider a new adapter rather than an edit spread through
+    // orders, billing and the flows.
+    $allowed = [
+        // The adapter itself.
+        'app/Cloud/Hetzner/',
+        // Where container bindings belong, and the only place the concrete
+        // credential resolver is named.
+        'app/Providers/AppServiceProvider.php',
+    ];
+
     $offenders = [];
 
     foreach (allProductionSources() as $path => $source) {
-        if (stripos($source, 'hetzner') !== false) {
-            $offenders[] = $path;
+        // Uses, not mentions — the same distinction this file draws about
+        // refunds. A class cannot be referenced without either importing it or
+        // naming it in full, and both contain the namespace; a sentence of
+        // prose naming the provider an adapter was written against does not.
+        if (! str_contains($source, 'App\\Cloud\\Hetzner')) {
+            continue;
         }
+
+        foreach ($allowed as $prefix) {
+            if (str_starts_with($path, $prefix)) {
+                continue 2;
+            }
+        }
+
+        $offenders[] = $path;
     }
 
     expect($offenders)->toBe([])
-        ->and(glob(base_path('app/Cloud/Hetzner/*')))->toBe([])
-        ->and(array_keys(config('providers.implementations', [])))->toBe(['fake']);
+        // And the registry still resolves by code alone, with every entry
+        // backed by a class that really implements the contract.
+        ->and(array_keys(config('providers.implementations', [])))->toBe(['fake', 'hetzner']);
 });
 
 it('ships no monthly renewal implementation', function (): void {

@@ -52,12 +52,18 @@ it('never lets the string "false" enable sales', function (): void {
 });
 
 it('refuses every non-bool offered for the kill switch', function (): void {
+    // The settings table is no longer empty on a fresh install: the monthly
+    // lifecycle defaults arrive by migration. What this test is about is that
+    // a refused write adds nothing, so the baseline is what it is compared to.
+    $before = Setting::query()->count();
+
     foreach (['true', 'false', '1', '0', '', 'yes', 1, 0, 1.0, 0.0, ['on'], 60] as $bad) {
         expect(fn () => $this->settings->set(SettingKey::SalesEnabled, $bad, $this->owner))
             ->toThrow(InvalidSettingValue::class, '', 'value '.json_encode($bad));
     }
 
-    expect(Setting::query()->count())->toBe(0);
+    expect(Setting::query()->where('key', SettingKey::SalesEnabled->value)->exists())->toBeFalse()
+        ->and(Setting::query()->count())->toBe($before);
 });
 
 it('stores a non-negative integer threshold', function (): void {
@@ -69,23 +75,32 @@ it('stores a non-negative integer threshold', function (): void {
 });
 
 it('refuses every non-int offered for the freshness threshold', function (): void {
+    // The settings table is no longer empty on a fresh install: the monthly
+    // lifecycle defaults arrive by migration. What this test is about is that
+    // a refused write adds nothing, so the baseline is what it is compared to.
+    $before = Setting::query()->count();
+
     foreach (['60', '0', '', 60.0, 0.5, true, false, ['60']] as $bad) {
         expect(fn () => $this->settings->set(SettingKey::FxMaxAgeMinutes, $bad, $this->owner))
             ->toThrow(InvalidSettingValue::class, '', 'value '.json_encode($bad));
     }
 
-    expect(Setting::query()->count())->toBe(0);
+    expect(Setting::query()->where('key', SettingKey::FxMaxAgeMinutes->value)->exists())->toBeFalse()
+        ->and(Setting::query()->count())->toBe($before);
 });
 
 it('refuses a negative freshness threshold', function (): void {
     // A negative limit describes no rate at all, so every sale would stop.
     // Better refused at the write than discovered by watching sales fail.
+    $before = Setting::query()->count();
+
     foreach ([-1, -60] as $bad) {
         expect(fn () => $this->settings->set(SettingKey::FxMaxAgeMinutes, $bad, $this->owner))
             ->toThrow(InvalidSettingValue::class);
     }
 
-    expect(Setting::query()->count())->toBe(0);
+    expect(Setting::query()->where('key', SettingKey::FxMaxAgeMinutes->value)->exists())->toBeFalse()
+        ->and(Setting::query()->count())->toBe($before);
 });
 
 it('leaves a previously valid value untouched when a write is refused', function (): void {
@@ -124,10 +139,13 @@ it('checks authorization before the value type', function (): void {
     $support = User::factory()->create();
     $support->assignRole(AdminRole::Support->value);
 
+    $before = Setting::query()->count();
+
     expect(fn () => $this->settings->set(SettingKey::SalesEnabled, 'false', $support))
         ->toThrow(UnauthorizedSettingChange::class);
 
-    expect(Setting::query()->count())->toBe(0);
+    expect(Setting::query()->where('key', SettingKey::SalesEnabled->value)->exists())->toBeFalse()
+        ->and(Setting::query()->count())->toBe($before);
 });
 
 it('names the key and the expected type in the refusal', function (): void {

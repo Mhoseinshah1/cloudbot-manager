@@ -8,11 +8,11 @@ use App\Enums\ServerActionType;
 use App\Enums\ServerPowerState;
 use App\Enums\ServerStatus;
 use App\Models\Server;
+use App\Servers\Exceptions\ServerActionNotAllowed;
+use App\Servers\Exceptions\ServerActionRefusal;
 use App\Subscriptions\Data\RenewalQuote;
 use App\Subscriptions\Exceptions\RenewalNotAllowed;
 use Carbon\CarbonImmutable;
-use App\Servers\Exceptions\ServerActionNotAllowed;
-use App\Servers\Exceptions\ServerActionRefusal;
 
 /**
  * What a customer reads about their servers.

@@ -129,5 +129,4 @@ class FailedJobs extends Page implements HasTable
             ->defaultSort('failed_at', 'desc')
             ->paginated([25, 50]);
     }
-
 }
