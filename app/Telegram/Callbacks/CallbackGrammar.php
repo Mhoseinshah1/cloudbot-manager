@@ -97,6 +97,12 @@ final class CallbackGrammar
         // read from the delete intent this system wrote, so a stale keyboard
         // cannot aim a week-old confirmation at a server chosen since.
         'srv:delok' => TelegramAction::ServerDeleteConfirm,
+
+        // Same reasoning for renewal: the confirmation carries a token, and
+        // the subscription and the price it was quoted at are read from the
+        // intent this system wrote — so an old keyboard cannot confirm a
+        // figure the customer saw last week.
+        'srv:rnok' => TelegramAction::ServerRenewConfirm,
     ];
 
     /**
@@ -111,6 +117,7 @@ final class CallbackGrammar
         'srv:rb' => TelegramAction::ServerReboot,
         'srv:pw' => TelegramAction::ServerRevealPassword,
         'srv:del' => TelegramAction::ServerDelete,
+        'srv:rn' => TelegramAction::ServerRenew,
         'inv:v' => TelegramAction::InvoiceView,
     ];
 
@@ -369,6 +376,16 @@ final class CallbackGrammar
     public static function serverDeleteConfirm(string $flow): string
     {
         return "srv:delok:{$flow}";
+    }
+
+    public static function serverRenew(int $id): string
+    {
+        return "srv:rn:{$id}";
+    }
+
+    public static function serverRenewConfirm(string $flow): string
+    {
+        return "srv:rnok:{$flow}";
     }
 
     public static function walletPage(int $page): string

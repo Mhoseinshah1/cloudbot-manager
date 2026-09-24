@@ -83,6 +83,12 @@ enum TelegramAction: string
     /** Asks for the confirmation screen. Deletes nothing. */
     case ServerDelete = 'server.delete';
 
+    /** The renewal offer: shows the current price, charges nothing. */
+    case ServerRenew = 'server.renew';
+
+    /** The confirmation. The only case that spends a customer's money here. */
+    case ServerRenewConfirm = 'server.renew_confirm';
+
     /** The confirmation itself. The only case that deletes anything. */
     case ServerDeleteConfirm = 'server.delete_confirm';
 

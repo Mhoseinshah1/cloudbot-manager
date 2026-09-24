@@ -136,6 +136,16 @@ final class ProcessTelegramUpdateJob implements ShouldQueue
                 return;
             }
 
+            // The durable rate-limit deadline, read from the row after the lock
+            // and before anything reaches Telegram. A job that was already
+            // queued when the 429 was written arrives here too, and releasing
+            // the worker that received the refusal said nothing to it.
+            if (! $update->mayProcessNow()) {
+                $this->release($this->secondsUntilAvailable($update));
+
+                return;
+            }
+
             // The other race: two different updates from one customer at once.
             // The update lock does not cover it — the ids differ — and both
             // would read the same conversation state and both act on it. Taken
@@ -224,7 +234,10 @@ final class ProcessTelegramUpdateJob implements ShouldQueue
             // Telegram asked us to wait. Released for exactly that long — not
             // retried immediately, and nothing sleeps while holding a worker.
             // The update stays pending, because it genuinely has not happened.
-            $recorder->markFailed($update, 'rate_limited');
+            // Durable first, queue release second. The release is only an
+            // optimisation for this delivery; the column is what every other
+            // worker honours.
+            $recorder->postpone($update, $limited->retryAfterSeconds, 'rate_limited');
             $this->release($limited->retryAfterSeconds);
 
             return;
@@ -303,6 +316,18 @@ final class ProcessTelegramUpdateJob implements ShouldQueue
         if ($account instanceof TelegramAccount) {
             $accounts->markBotBlocked($account);
         }
+    }
+
+    /** Whole seconds left on the durable deadline, at least one. */
+    private function secondsUntilAvailable(TelegramUpdate $update): int
+    {
+        $available = $update->available_at;
+
+        if ($available === null) {
+            return 1;
+        }
+
+        return max(1, (int) ceil(now()->diffInSeconds($available, false)));
     }
 
     private function lockKey(): string

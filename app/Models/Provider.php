@@ -87,6 +87,16 @@ class Provider extends Model
     /**
      * @return HasMany<ProviderImage, $this>
      */
+    /**
+     * The machines this provider is running for us.
+     *
+     * @return HasMany<Server, $this>
+     */
+    public function servers(): HasMany
+    {
+        return $this->hasMany(Server::class);
+    }
+
     public function images(): HasMany
     {
         return $this->hasMany(ProviderImage::class);

@@ -15,6 +15,7 @@ use App\Outbox\OutboxTopic;
 use App\Outbox\OutboxWriter;
 use App\Servers\Exceptions\ServerActionNotAllowed;
 use Carbon\CarbonImmutable;
+use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 
@@ -170,6 +171,11 @@ final readonly class ServerActionService
 
         $attributes['error_category'] = $category?->value;
 
+        // A durable outcome has been recorded, so no provider write is
+        // outstanding any more. Cleared in the same statement that records it,
+        // never as a separate step somebody can interleave.
+        $attributes['provider_attempt_reserved_at'] = null;
+
         $affected = ServerAction::query()
             ->whereKey($action->getKey())
             ->whereIn('status', [ServerActionStatus::Pending->value, ServerActionStatus::Running->value])
@@ -186,6 +192,25 @@ final readonly class ServerActionService
      * how a crash loop sends the same destructive request forever. The bound is
      * in the WHERE clause, so two workers cannot both take the last one.
      *
+     * Two durable shapes may be initiated, and only two.
+     *
+     * `attempts` is zero: no reservation has ever been taken, so no provider
+     * write can have started.
+     *
+     * Or the last call completed and is known to have changed nothing — a
+     * category the enum calls retryable, recorded against an action holding no
+     * provider handle. That pairing is evidence: the call finished, the provider
+     * refused it in a way that takes no effect, nothing is outstanding.
+     *
+     * Everything else is refused, and the shape that matters is the one this
+     * method itself creates: `attempts > 0` with no category and no handle. That
+     * is a reservation whose outcome nobody has written down — a provider write
+     * that may be in flight this second — and it is indistinguishable, from the
+     * row alone, from a worker that died inside a delete. Redis cannot be what
+     * refuses the second one: a coordination lock can expire, be lost, or be
+     * released by a stalled process, and the duplicate then arrives to a row
+     * that looks like ordinary pending work.
+     *
      * @return bool Whether this worker may proceed.
      */
     public function reserveAttempt(ServerAction $action, int $maximum): bool
@@ -193,8 +218,155 @@ final readonly class ServerActionService
         return ServerAction::query()
             ->whereKey($action->getKey())
             ->where('attempts', '<', $maximum)
+            // The durable executability rule, and the reason a duplicate cannot
+            // send a second delete. Asked of the database rather than of a PHP
+            // model, because the model was read before the other worker's
+            // reservation committed and says so.
+            ->where(function (Builder $query): void {
+                $query->where('attempts', 0)
+                    // Tied to `isRetryable()` rather than spelled out, so the
+                    // database and the executor cannot come to different
+                    // conclusions about what is safe to repeat.
+                    ->orWhereIn('error_category', ProviderErrorCategory::retryableValues());
+            })
+            // Pending only. `Running` means the provider accepted an operation
+            // and is still working on it, and initiating a second one would ask
+            // for the same reboot or the same delete twice. The per-server lock
+            // does not prevent that on its own: it serializes two workers, and
+            // the second one simply arrives after the first has released. Only
+            // the durable state can refuse it.
+            ->where('status', ServerActionStatus::Pending->value)
+            // The same fact from the other side. A provider handle means there
+            // is an outstanding operation to poll, and polling is where it
+            // belongs — never re-initiation.
+            ->whereNull('provider_action_id')
+            // The durable barrier, in the WHERE clause rather than only in a
+            // caller's check. A prequeued duplicate cannot walk past a delay by
+            // forgetting to look first.
+            ->where(function (Builder $query): void {
+                $query->whereNull('retry_after')->orWhere('retry_after', '<=', now());
+            })
+            ->update([
+                'attempts' => DB::raw('attempts + 1'),
+                // Cleared in the same statement that grants permission to call
+                // the provider, and this is the whole point of doing it here.
+                //
+                // These two columns are evidence about the *last* provider
+                // call: a category the enum calls retryable, and the time after
+                // which another attempt is allowed. Leaving them in place while
+                // a new attempt goes out makes them a lie the moment the call
+                // leaves — and a worker that then dies leaves reconciliation
+                // reading attempt N-1's "safely refused, nothing happened"
+                // against attempt N, whose outcome nobody knows. That is how a
+                // delete gets sent a second time.
+                //
+                // After this statement succeeds the row means exactly one
+                // thing: a provider write may now be in flight and its outcome
+                // is not yet known.
+                'error_category' => null,
+                'retry_after' => null,
+                // When this provider write started. The reconciler needs it:
+                // the reserved shape says a call may be outstanding, and only
+                // this says for how long, which is what separates "still
+                // running" from "the worker died".
+                'provider_attempt_reserved_at' => CarbonImmutable::now(),
+                'updated_at' => now(),
+            ]) === 1;
+    }
+
+    /**
+     * Hold a retryable failure open until a stated time, without settling it.
+     *
+     * For a provider answer the category itself declares safe to repeat — a
+     * rate limit, an outage, a transient error. Settling those as `failed`
+     * threw away a customer's power off or delete because the provider was busy
+     * for a minute, and a failed action is excluded from reconciliation, so the
+     * remaining durable attempts were never spent.
+     *
+     * Two things are written and both matter. The category is what a later
+     * sweep reads to know this action's last provider call completed with a
+     * known-safe outcome — which is the difference between a retry that is safe
+     * and one that might repeat a delete. The deadline is durable, so a
+     * duplicate job already queued cannot walk past it.
+     *
+     * Compare-and-set on the open statuses, so this cannot reopen an action
+     * somebody else has already settled.
+     *
+     * @return bool Whether this worker wrote the barrier.
+     */
+    public function postpone(ServerAction $action, int $seconds, ProviderErrorCategory $category): bool
+    {
+        return ServerAction::query()
+            ->whereKey($action->getKey())
             ->whereIn('status', [ServerActionStatus::Pending->value, ServerActionStatus::Running->value])
-            ->update(['attempts' => DB::raw('attempts + 1'), 'updated_at' => now()]) === 1;
+            ->update([
+                'retry_after' => CarbonImmutable::now()->addSeconds(max(1, $seconds)),
+                'error_category' => $category->value,
+                // The call completed and was refused safely: nothing is in
+                // flight.
+                'provider_attempt_reserved_at' => null,
+                'updated_at' => now(),
+            ]) === 1;
+    }
+
+    /**
+     * Return a failed provider operation to a state a later attempt may use.
+     *
+     * For the one case where the provider's own answer is both terminal and
+     * safe: the operation it accepted has ended in failure, and the normalized
+     * category says repeating the request could work.
+     *
+     * Three things move together, and doing them in one statement is what makes
+     * this safe rather than a sequence somebody can interleave. The status goes
+     * back to pending, so a later execution may start a genuinely new
+     * operation. The finished provider handle is cleared, because polling an
+     * operation that has already ended is how a reconciler settles an action
+     * from stale evidence. And a durable barrier is written, so the retry
+     * cannot be immediate and cannot be walked past by a job that was already
+     * queued.
+     *
+     * The attempt this consumed stays consumed. A provider write genuinely
+     * happened; the budget is what stops this becoming a loop.
+     *
+     * Compare-and-set on the running state, so this cannot reopen an action
+     * somebody else has already settled.
+     *
+     * @return bool Whether this worker made the transition.
+     */
+    public function reopenForRetry(ServerAction $action, int $seconds, ProviderErrorCategory $category): bool
+    {
+        return ServerAction::query()
+            ->whereKey($action->getKey())
+            ->whereIn('status', [ServerActionStatus::Pending->value, ServerActionStatus::Running->value])
+            ->update([
+                'status' => ServerActionStatus::Pending->value,
+                'provider_action_id' => null,
+                'error_category' => $category->value,
+                'retry_after' => CarbonImmutable::now()->addSeconds(max(1, $seconds)),
+                'settled_at' => null,
+                // The operation the provider accepted has ended, so the
+                // previous reservation is closed.
+                'provider_attempt_reserved_at' => null,
+                'updated_at' => now(),
+            ]) === 1;
+    }
+
+    /**
+     * Whether this action's last provider call is known to have changed nothing.
+     *
+     * True only when a category the enum itself calls retryable was recorded
+     * against an action that never received a provider handle. That pairing is
+     * the evidence: the call completed, the provider refused it in a way that
+     * takes no effect, and no operation is outstanding. Anything else — a
+     * timeout, an uncertain result, an attempt reserved by a worker that then
+     * died without recording an outcome — leaves open the possibility that the
+     * request landed, and a second delete is not something to guess about.
+     */
+    public function lastCallIsKnownSafe(ServerAction $action): bool
+    {
+        return $action->provider_action_id === null
+            && $action->error_category instanceof ProviderErrorCategory
+            && $action->error_category->isRetryable();
     }
 
     /** This customer's action history for one server, newest first. */

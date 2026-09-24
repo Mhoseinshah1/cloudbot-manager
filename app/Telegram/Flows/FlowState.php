@@ -34,6 +34,9 @@ final readonly class FlowState
 
     public const SERVER_DELETE = 'server_delete';
 
+    /** A renewal the customer has been quoted and not yet confirmed. */
+    public const SERVER_RENEW = 'server_renew';
+
     /*
      * Where a buy flow has got to. Stored, because the step decides what the
      * next tap is allowed to do — a confirmation arriving before a preview was

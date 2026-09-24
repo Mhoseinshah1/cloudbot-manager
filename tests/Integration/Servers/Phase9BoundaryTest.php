@@ -158,13 +158,19 @@ it('ships no monthly renewal implementation', function (): void {
 
 it('offers only the capabilities this release implements', function (): void {
     // Advertising one before it works would be a promise the system cannot
-    // keep. Rebuild, reset-password and usage belong to Release 1.1.
+    // keep. Rebuild and usage belong to Release 1.1.
+    //
+    // `password_reset` is here by an explicit decision and with a narrow scope:
+    // it lets provisioning rotate a root credential that was lost before the
+    // server was ever delivered, which is the only way that credential can be
+    // recovered without a second secret store. It is not a customer feature —
+    // the boundary tests below prove no customer-facing reset flow exists.
     $cases = array_map(
         static fn (App\Cloud\Enums\ProviderCapability $case): string => $case->value,
         App\Cloud\Enums\ProviderCapability::cases(),
     );
 
-    expect($cases)->toBe(['power_control', 'reboot']);
+    expect($cases)->toBe(['power_control', 'reboot', 'password_reset']);
 });
 
 /**

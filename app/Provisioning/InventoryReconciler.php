@@ -8,6 +8,7 @@ use App\Audit\AuditEvent;
 use App\Audit\AuditRecorder;
 use App\Cloud\Contracts\CloudProviderInterface;
 use App\Cloud\Data\ProviderServerData;
+use App\Cloud\Enums\ProviderServerStatus;
 use App\Cloud\Exceptions\ProviderException;
 use App\Enums\ServerPowerState;
 use App\Enums\ServerStatus;
@@ -143,8 +144,61 @@ final readonly class InventoryReconciler
      */
     private function synchronize(Server $server, ProviderServerData $remote, InventoryReport $report): void
     {
-        $changes = [];
+        // Every provider read happened before this point and outside any
+        // transaction. What follows is short, local, and decides from a locked
+        // row rather than from the instance the read started with.
+        DB::transaction(function () use ($server, $remote, $report): void {
+            $fresh = Server::query()->whereKey($server->getKey())->lockForUpdate()->first();
 
+            if (! $fresh instanceof Server) {
+                return;
+            }
+
+            if ($fresh->status === ServerStatus::Terminated) {
+                // Terminated while the provider was being read. Writing the
+                // instance this sweep loaded would resurrect a machine somebody
+                // else deliberately ended.
+                return;
+            }
+
+            $changes = $this->desiredChanges($fresh, $remote);
+
+            if ($changes === []) {
+                return;
+            }
+
+            $fresh->forceFill($changes)->save();
+
+            $this->audit->record(
+                AuditEvent::InventoryDriftCorrected,
+                subject: $fresh,
+                metadata: [
+                    'server_id' => $fresh->getKey(),
+                    // Which fields moved, not their values: an address is not a
+                    // secret but an audit entry is not a mirror of the table.
+                    'fields' => implode(',', array_keys($changes)),
+                ],
+            );
+
+            $report->drifted++;
+
+            if (($changes['status'] ?? null) === ServerStatus::NeedsAttention) {
+                // Money is untouched: no refund, no termination, no subscription
+                // change. The provider says the machine is broken, not gone.
+                $this->alerts->remoteUnhealthy($fresh, [
+                    'provider_status' => $remote->status->value,
+                ]);
+            }
+        });
+    }
+
+    /**
+     * What this provider answer is entitled to change on a locked local row.
+     *
+     * @return array<string, mixed>
+     */
+    private function desiredChanges(Server $server, ProviderServerData $remote): array
+    {
         $desired = [
             'ip_address' => $remote->ipv4,
             'ipv6_address' => $remote->ipv6,
@@ -153,11 +207,21 @@ final readonly class InventoryReconciler
             'provider_metadata' => $remote->metadata->toArray(),
         ];
 
-        // A server we had marked missing that the provider now holds again is
-        // simply back; nothing else re-activates it.
-        if ($server->status === ServerStatus::Missing) {
+        if ($remote->status === ProviderServerStatus::Error) {
+            // The provider says this machine is in an error state. It exists —
+            // so it is emphatically not `missing` — but nothing may keep
+            // presenting it as healthy, and `isBillable()` is false here, so a
+            // renewal will not quietly charge for it either.
+            if ($server->status !== ServerStatus::NeedsAttention) {
+                $desired['status'] = ServerStatus::NeedsAttention;
+            }
+        } elseif (in_array($server->status, [ServerStatus::Missing, ServerStatus::NeedsAttention], true)) {
+            // The provider now reports an ordinary state for a machine we had
+            // lost or flagged. It is simply back; nothing else re-activates it.
             $desired['status'] = ServerStatus::Active;
         }
+
+        $changes = [];
 
         foreach ($desired as $attribute => $value) {
             $current = $server->getAttribute($attribute);
@@ -173,26 +237,7 @@ final readonly class InventoryReconciler
             }
         }
 
-        if ($changes === []) {
-            return;
-        }
-
-        DB::transaction(function () use ($server, $changes, $report): void {
-            $server->forceFill($changes)->save();
-
-            $this->audit->record(
-                AuditEvent::InventoryDriftCorrected,
-                subject: $server,
-                metadata: [
-                    'server_id' => $server->getKey(),
-                    // Which fields moved, not their values: an address is not a
-                    // secret but an audit entry is not a mirror of the table.
-                    'fields' => implode(',', array_keys($changes)),
-                ],
-            );
-
-            $report->drifted++;
-        });
+        return $changes;
     }
 
     /**
@@ -214,6 +259,30 @@ final readonly class InventoryReconciler
         }
 
         DB::transaction(function () use ($server, $report): void {
+            // Re-read under a row lock. The provider read that concluded this
+            // machine is absent happened before the transaction opened, and
+            // another transaction may have terminated the server since —
+            // writing the stale instance would resurrect it as `missing`.
+            $fresh = Server::query()->whereKey($server->getKey())->lockForUpdate()->first();
+
+            if (! $fresh instanceof Server) {
+                return;
+            }
+
+            if ($fresh->status === ServerStatus::Terminated) {
+                // Ended deliberately while we were looking. A provider no
+                // longer holding it is the expected state, not a discrepancy.
+                return;
+            }
+
+            if ($fresh->status === ServerStatus::Missing) {
+                // Another sweep got there first.
+                $report->missing++;
+
+                return;
+            }
+
+            $server = $fresh;
             $server->forceFill(['status' => ServerStatus::Missing])->save();
 
             Subscription::query()

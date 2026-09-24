@@ -116,4 +116,28 @@ final readonly class TelegramUpdateRecorder
                 'updated_at' => now(),
             ]);
     }
+
+    /**
+     * Hold an update until Telegram says we may talk to it again.
+     *
+     * Written to the row rather than only to the queue delivery. Releasing the
+     * job delays this worker; a duplicate already queued when the 429 arrived
+     * would otherwise call straight past the deadline and earn a longer limit.
+     *
+     * The update stays unprocessed on purpose: it genuinely has not happened.
+     */
+    public function postpone(TelegramUpdate $update, int $seconds, string $reason): bool
+    {
+        $affected = TelegramUpdate::query()
+            ->whereKey($update->getKey())
+            ->where('status', '!=', TelegramUpdateStatus::Processed->value)
+            ->update([
+                'status' => TelegramUpdateStatus::Failed->value,
+                'failure_reason' => mb_substr($reason, 0, 200),
+                'available_at' => CarbonImmutable::now()->addSeconds(max(1, $seconds)),
+                'updated_at' => now(),
+            ]);
+
+        return $affected === 1;
+    }
 }

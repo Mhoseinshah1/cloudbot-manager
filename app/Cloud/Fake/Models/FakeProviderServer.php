@@ -22,6 +22,7 @@ use Illuminate\Database\Eloquent\Model;
  * @property string $provider_plan_id
  * @property string $provider_location_id
  * @property string $provider_image_id
+ * @property string|null $root_password_verifier
  * @property string|null $ipv4
  * @property string|null $ipv6
  * @property ProviderServerStatus $status
@@ -38,8 +39,19 @@ class FakeProviderServer extends Model
     protected $fillable = [
         'provider_server_id', 'provisioning_token', 'name',
         'provider_plan_id', 'provider_location_id', 'provider_image_id',
-        'status', 'power_state', 'ipv4', 'ipv6', 'metadata',
+        'status', 'power_state', 'ipv4', 'ipv6', 'metadata', 'root_password_verifier',
     ];
+
+    /**
+     * The simulator's one-way check on the password it issued.
+     *
+     * A digest, never the password: nothing can read a credential back out of
+     * this column, which is the point. Hidden as well, so a test dumping a fake
+     * server does not print provider bookkeeping that looks like a secret.
+     *
+     * @var list<string>
+     */
+    protected $hidden = ['root_password_verifier'];
 
     /**
      * @return array<string, string>

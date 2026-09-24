@@ -52,3 +52,22 @@ Schedule::command('server-actions:reconcile')
     ->everyFiveMinutes()
     ->withoutOverlapping()
     ->runInBackground();
+
+// The safety net under the Telegram webhook. The update row and the job that
+// handles it cannot be written atomically, so a lost delivery leaves a customer
+// pressing a button and getting silence. Every five minutes; the sweep only
+// queues work, it never talks to Telegram itself.
+Schedule::command('telegram:recover-updates')
+    ->everyFiveMinutes()
+    ->withoutOverlapping()
+    ->runInBackground();
+
+// The monthly service lifecycle: warn, grace, and eventually terminate. Every
+// five minutes, because a customer warned three days before expiry should be
+// warned at roughly the right time, and a grace window that closed should not
+// sit unacted on for an hour. It charges nobody — renewal is the customer's
+// decision — and it only ever queues provider work for the worker built to wait.
+Schedule::command('subscriptions:process-expiry')
+    ->everyFiveMinutes()
+    ->withoutOverlapping()
+    ->runInBackground();

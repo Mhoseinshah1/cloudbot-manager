@@ -377,10 +377,43 @@ it('reveals nothing to a suspended customer', function (): void {
 });
 
 it('offers no reveal when no password is held', function (): void {
+    // Provisioning now stores the credential the provider issued, so the
+    // no-password case has to be arranged rather than assumed. It is a real
+    // case: a provider that authenticates by key issues none.
+    $this->server->forceFill(['root_password_encrypted' => null])->save();
+
     $this->bot->tap(CallbackGrammar::serverView((int) $this->server->getKey()));
 
     expect(BotFloor::buttonsSent())
         ->not->toContain(CallbackGrammar::serverRevealPassword((int) $this->server->getKey()));
+});
+
+it('reveals the credential provisioning actually stored, to its owner only', function (): void {
+    // End to end: the password the provider issued at create time, through the
+    // encrypted column, to the one person entitled to see it. Nothing is set up
+    // by hand here — the credential arrived through the create contract.
+    $issued = (string) $this->server->fresh()->root_password_encrypted;
+
+    expect($issued)->not->toBe('')
+        // Confirmed by presenting it to the provider, which is the only way to
+        // learn what password a machine has: the simulator keeps a verifier.
+        ->and(Simulator::plain()->credentialMatches(
+            (string) $this->server->provider_server_id, $issued,
+        ))->toBeTrue();
+
+    $this->bot->tap(CallbackGrammar::serverRevealPassword((int) $this->server->getKey()));
+
+    expect(BotFloor::transcript())->toContain($issued)
+        ->and(AuditLog::query()->where('event', AuditEvent::ServerPasswordRevealed)->count())->toBe(1);
+
+    // And to nobody else. A stranger tapping the same button sees nothing and
+    // leaves no reveal behind.
+    $stranger = otherCustomersServer();
+    $stranger->forceFill(['root_password_encrypted' => $issued])->save();
+
+    $this->bot->tap(CallbackGrammar::serverRevealPassword((int) $stranger->getKey()));
+
+    expect(AuditLog::query()->where('event', AuditEvent::ServerPasswordRevealed)->count())->toBe(1);
 });
 
 it('refuses every management action from a suspended customer', function (string $callback): void {

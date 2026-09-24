@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Models;
 
 use App\Enums\ExchangeRateSource;
+use App\Exceptions\FinancialRecordDeletionForbidden;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
@@ -54,5 +55,23 @@ class ExchangeRate extends Model
     public function createdByAdmin(): BelongsTo
     {
         return $this->belongsTo(User::class, 'created_by_admin_id');
+    }
+
+    /**
+     * Append-only, and the database enforces this too.
+     *
+     * Orders and invoices are priced against a specific row; rewriting one
+     * restates what a customer was charged against with nothing to show for it.
+     * A rate changes by inserting the next one.
+     */
+    protected static function booted(): void
+    {
+        static::updating(static function (self $rate): never {
+            throw FinancialRecordDeletionForbidden::forExchangeRate();
+        });
+
+        static::deleting(static function (self $rate): never {
+            throw FinancialRecordDeletionForbidden::forExchangeRate();
+        });
     }
 }

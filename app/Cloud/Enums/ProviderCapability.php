@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Cloud\Enums;
 
+use App\Cloud\Capabilities\SupportsPasswordReset;
 use App\Cloud\Capabilities\SupportsPowerControl;
 use App\Cloud\Capabilities\SupportsReboot;
 use App\Cloud\Contracts\CloudProviderInterface;
@@ -24,6 +25,15 @@ enum ProviderCapability: string
     case Reboot = 'reboot';
 
     /**
+     * Issuing a new root password for a server the provider already runs.
+     *
+     * Present in Release 1.0 for one internal purpose: recovering a
+     * provisioning credential lost before delivery. It backs no customer-facing
+     * reset flow, and advertising it does not imply one. See ADR-003.
+     */
+    case PasswordReset = 'password_reset';
+
+    /**
      * The interface a provider must implement to offer this capability.
      *
      * @return class-string
@@ -33,6 +43,7 @@ enum ProviderCapability: string
         return match ($this) {
             self::PowerControl => SupportsPowerControl::class,
             self::Reboot => SupportsReboot::class,
+            self::PasswordReset => SupportsPasswordReset::class,
         };
     }
 

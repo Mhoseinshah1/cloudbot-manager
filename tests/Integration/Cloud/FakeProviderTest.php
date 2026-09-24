@@ -36,7 +36,7 @@ it('never touches the network', function (): void {
     Http::preventStrayRequests();
 
     $provider = app(FakeProvider::class);
-    $server = $provider->createServer(fakeRequest());
+    $server = $provider->createServer(fakeRequest())->server;
 
     $provider->getLocations();
     $provider->getPlans();
@@ -54,7 +54,7 @@ it('never touches the network', function (): void {
 it('shares state between independently constructed instances', function (): void {
     // Two adapters are two views of one provider, exactly as a web request and
     // a queue worker would be.
-    $created = (new FakeProvider(new FakeCatalog))->createServer(fakeRequest());
+    $created = (new FakeProvider(new FakeCatalog))->createServer(fakeRequest())->server;
 
     $seenByAnother = (new FakeProvider(new FakeCatalog))->getServer($created->providerServerId);
 
@@ -62,7 +62,7 @@ it('shares state between independently constructed instances', function (): void
 });
 
 it('shares state with a provider resolved through the manager', function (): void {
-    $created = app(FakeProvider::class)->createServer(fakeRequest());
+    $created = app(FakeProvider::class)->createServer(fakeRequest())->server;
 
     $viaManager = app(ProviderManager::class)->driver('fake');
 
@@ -73,7 +73,7 @@ it('shares state with a provider resolved through the manager', function (): voi
 it('keeps no server state in the object itself', function (): void {
     // Proves the state is in the database rather than in the instance: a
     // provider built after the server was created still sees it.
-    $created = app(FakeProvider::class)->createServer(fakeRequest());
+    $created = app(FakeProvider::class)->createServer(fakeRequest())->server;
 
     expect(FakeProviderServer::query()->where('provider_server_id', $created->providerServerId)->exists())
         ->toBeTrue();
@@ -83,7 +83,7 @@ it('gives servers process-independent identifiers', function (): void {
     $provider = app(FakeProvider::class);
 
     $ids = array_map(
-        fn (): string => $provider->createServer(fakeRequest())->providerServerId,
+        fn (): string => $provider->createServer(fakeRequest())->server->providerServerId,
         range(1, 5),
     );
 
@@ -99,7 +99,7 @@ it('gives servers process-independent identifiers', function (): void {
 
 it('gives actions unique identifiers', function (): void {
     $provider = app(FakeProvider::class);
-    $server = $provider->createServer(fakeRequest());
+    $server = $provider->createServer(fakeRequest())->server;
 
     $ids = [
         $provider->powerOff($server->providerServerId)->providerActionId,
@@ -115,7 +115,7 @@ it('creates one server for one token however many times it is asked', function (
     $provider = app(FakeProvider::class);
 
     $ids = array_map(
-        fn (): string => $provider->createServer(fakeRequest($token))->providerServerId,
+        fn (): string => $provider->createServer(fakeRequest($token))->server->providerServerId,
         range(1, 4),
     );
 
@@ -127,7 +127,7 @@ it('enforces one server per token in the database', function (): void {
     // The application checks first, but the constraint is what makes it true
     // under concurrency, when both callers checked before either inserted.
     $token = (string) Str::uuid();
-    app(FakeProvider::class)->createServer(fakeRequest($token));
+    app(FakeProvider::class)->createServer(fakeRequest($token))->server;
 
     expect(fn () => FakeProviderServer::query()->create([
         'provider_server_id' => (string) Str::ulid(),
@@ -169,7 +169,7 @@ it('recovers the winner when a concurrent create loses the race', function (): v
         ]);
     });
 
-    $result = $provider->createServer(fakeRequest($token));
+    $result = $provider->createServer(fakeRequest($token))->server;
 
     expect($result->providerServerId)->toBe($winnerId)
         ->and($result->name)->toBe('winner')
@@ -206,7 +206,7 @@ it('leaves the caller transaction usable after losing the race', function (): vo
     });
 
     $result = DB::transaction(function () use ($provider, $token) {
-        $server = $provider->createServer(fakeRequest($token));
+        $server = $provider->createServer(fakeRequest($token))->server;
 
         // Still inside the same transaction: this query proves it was not
         // aborted by the duplicate key.
@@ -230,7 +230,7 @@ it('refuses to create what it cannot supply', function (): void {
         app(FakeProvider::class)->createServer(fakeRequest(null, [
             'plan' => FakeCatalog::PLAN_LARGE,
             'location' => FakeCatalog::LOCATION_SECONDARY,
-        ]));
+        ]))->server;
         expect(false)->toBeTrue('expected an out-of-stock failure');
     } catch (ProviderException $exception) {
         expect($exception->category)->toBe(ProviderErrorCategory::OutOfStock)
@@ -242,7 +242,7 @@ it('refuses to create what it cannot supply', function (): void {
 
 it('rejects an unknown plan, location or image as our mistake', function (array $overrides): void {
     try {
-        app(FakeProvider::class)->createServer(fakeRequest(null, $overrides));
+        app(FakeProvider::class)->createServer(fakeRequest(null, $overrides))->server;
         expect(false)->toBeTrue('expected an invalid-request failure');
     } catch (ProviderException $exception) {
         expect($exception->category)->toBe(ProviderErrorCategory::InvalidRequest)
@@ -256,7 +256,7 @@ it('rejects an unknown plan, location or image as our mistake', function (array 
 
 it('powers a server off and on', function (): void {
     $provider = app(FakeProvider::class);
-    $server = $provider->createServer(fakeRequest());
+    $server = $provider->createServer(fakeRequest())->server;
 
     $provider->powerOff($server->providerServerId);
     expect($provider->getServer($server->providerServerId)->powerState)->toBe(ProviderPowerState::Off);
@@ -267,7 +267,7 @@ it('powers a server off and on', function (): void {
 
 it('leaves a rebooted server running', function (): void {
     $provider = app(FakeProvider::class);
-    $server = $provider->createServer(fakeRequest());
+    $server = $provider->createServer(fakeRequest())->server;
 
     $provider->powerOff($server->providerServerId);
     $provider->reboot($server->providerServerId);
@@ -277,7 +277,7 @@ it('leaves a rebooted server running', function (): void {
 
 it('marks a deleted server deleted and powered off', function (): void {
     $provider = app(FakeProvider::class);
-    $server = $provider->createServer(fakeRequest());
+    $server = $provider->createServer(fakeRequest())->server;
 
     $provider->deleteServer($server->providerServerId);
     $after = $provider->getServer($server->providerServerId);
@@ -288,7 +288,7 @@ it('marks a deleted server deleted and powered off', function (): void {
 
 it('stops listing a deleted server', function (): void {
     $provider = app(FakeProvider::class);
-    $server = $provider->createServer(fakeRequest());
+    $server = $provider->createServer(fakeRequest())->server;
 
     $provider->deleteServer($server->providerServerId);
 
@@ -306,7 +306,7 @@ it('keeps the provisioning token on the deleted row', function (): void {
     // already fulfilled and terminated — and bill the customer for it.
     $token = (string) Str::uuid();
     $provider = app(FakeProvider::class);
-    $server = $provider->createServer(fakeRequest($token));
+    $server = $provider->createServer(fakeRequest($token))->server;
 
     $provider->deleteServer($server->providerServerId);
 
@@ -324,7 +324,7 @@ it('still resolves a deleted server by its provisioning token', function (): voi
     // terminated order look like one that was never provisioned.
     $token = (string) Str::uuid();
     $provider = app(FakeProvider::class);
-    $server = $provider->createServer(fakeRequest($token));
+    $server = $provider->createServer(fakeRequest($token))->server;
 
     $provider->deleteServer($server->providerServerId);
     $found = $provider->findByProvisioningToken($token);
@@ -340,10 +340,10 @@ it('creates no replacement when the same token is retried after deletion', funct
     $token = (string) Str::uuid();
     $provider = app(FakeProvider::class);
 
-    $original = $provider->createServer(fakeRequest($token));
+    $original = $provider->createServer(fakeRequest($token))->server;
     $provider->deleteServer($original->providerServerId);
 
-    $retried = $provider->createServer(fakeRequest($token));
+    $retried = $provider->createServer(fakeRequest($token))->server;
 
     expect($retried->providerServerId)->toBe($original->providerServerId)
         // The caller learns the outcome from the status rather than being
@@ -358,7 +358,7 @@ it('still refuses another row claiming a deleted server token', function (): voi
     // could reintroduce the duplicate the application now avoids.
     $token = (string) Str::uuid();
     $provider = app(FakeProvider::class);
-    $server = $provider->createServer(fakeRequest($token));
+    $server = $provider->createServer(fakeRequest($token))->server;
     $provider->deleteServer($server->providerServerId);
 
     expect(fn () => FakeProviderServer::query()->create([
@@ -378,10 +378,10 @@ it('creates a new server for a genuinely new token', function (): void {
     // carries a new token and gets a new server.
     $provider = app(FakeProvider::class);
 
-    $first = $provider->createServer(fakeRequest((string) Str::uuid()));
+    $first = $provider->createServer(fakeRequest((string) Str::uuid()))->server;
     $provider->deleteServer($first->providerServerId);
 
-    $second = $provider->createServer(fakeRequest((string) Str::uuid()));
+    $second = $provider->createServer(fakeRequest((string) Str::uuid()))->server;
 
     expect($second->providerServerId)->not->toBe($first->providerServerId)
         ->and($second->status)->toBe(ProviderServerStatus::Active)
@@ -392,7 +392,7 @@ it('treats deleting an already deleted server as done', function (): void {
     // Deleting something already gone has achieved what the caller wanted.
     // Failing would leave a termination no retry could ever complete.
     $provider = app(FakeProvider::class);
-    $server = $provider->createServer(fakeRequest());
+    $server = $provider->createServer(fakeRequest())->server;
 
     $provider->deleteServer($server->providerServerId);
     $second = $provider->deleteServer($server->providerServerId);
@@ -405,7 +405,7 @@ it('refuses to power a deleted server', function (): void {
     // A caller acting on stale local state should find out, not silently
     // appear to succeed.
     $provider = app(FakeProvider::class);
-    $server = $provider->createServer(fakeRequest());
+    $server = $provider->createServer(fakeRequest())->server;
     $provider->deleteServer($server->providerServerId);
 
     expect(fn () => $provider->powerOn($server->providerServerId))
@@ -414,7 +414,7 @@ it('refuses to power a deleted server', function (): void {
 
 it('keeps action history after the server is gone', function (): void {
     $provider = app(FakeProvider::class);
-    $server = $provider->createServer(fakeRequest());
+    $server = $provider->createServer(fakeRequest())->server;
     $action = $provider->deleteServer($server->providerServerId);
 
     expect($provider->getAction($action->providerActionId)->providerServerId)
@@ -432,29 +432,110 @@ it('stores only safe labels as metadata', function (): void {
     $provider = app(FakeProvider::class);
     $server = $provider->createServer(fakeRequest(null, [
         'labels' => ['managed_by' => 'cloudbot', 'environment' => 'test'],
-    ]));
+    ]))->server;
 
     expect($server->metadata->toArray())->toBe(['managed_by' => 'cloudbot', 'environment' => 'test']);
 });
 
 it('gives servers documentation-range addresses only', function (): void {
     // Nothing here may look like, or be routable to, a real host.
-    $server = app(FakeProvider::class)->createServer(fakeRequest());
+    $server = app(FakeProvider::class)->createServer(fakeRequest())->server;
 
     expect($server->ipv4)->toStartWith('198.51.100.')
         ->and($server->ipv6)->toStartWith('2001:db8::');
 });
 
-it('advertises no release 1.1 capability', function (): void {
+it('issues a credential on create and can verify it, without keeping it', function (): void {
+    $provider = app(FakeProvider::class);
+    $created = $provider->createServer(fakeRequest());
+
+    $a = $created->rootCredential;
+
+    expect($created->hasCredential())->toBeTrue()
+        ->and($a)->toBeInstanceOf(App\Cloud\Data\SensitiveRootCredential::class)
+        ->and($provider->credentialMatches($created->server->providerServerId, $a))->toBeTrue()
+        // A different credential does not.
+        ->and($provider->credentialMatches(
+            $created->server->providerServerId,
+            'rt-'.bin2hex(random_bytes(16)),
+        ))->toBeFalse();
+
+    // Only a digest is kept. Nothing can read the password back out of it.
+    $row = (array) DB::table('fake_provider_servers')
+        ->where('provider_server_id', $created->server->providerServerId)
+        ->first();
+
+    expect(array_keys($row))->not->toContain('root_password')
+        ->and((string) json_encode($row, JSON_THROW_ON_ERROR))->not->toContain($a->reveal())
+        ->and($row['root_password_verifier'])->toHaveLength(64);
+});
+
+it('rotates a credential so the previous one stops working', function (): void {
+    $provider = app(FakeProvider::class);
+    $created = $provider->createServer(fakeRequest());
+    $serverId = $created->server->providerServerId;
+
+    $a = $created->rootCredential;
+    $reset = $provider->resetRootPassword($serverId);
+    $b = $reset->rootCredential;
+
+    expect($reset->isUsable())->toBeTrue()
+        ->and($b)->toBeInstanceOf(App\Cloud\Data\SensitiveRootCredential::class)
+        // B is genuinely a different password.
+        ->and($b->reveal())->not->toBe($a->reveal())
+        // The provider now accepts B and no longer accepts A. A plaintext
+        // column could only have pretended to model this.
+        ->and($provider->credentialMatches($serverId, $b))->toBeTrue()
+        ->and($provider->credentialMatches($serverId, $a))->toBeFalse()
+        // And the reset's own metadata carries no credential.
+        ->and((string) json_encode($reset->metadata->toArray(), JSON_THROW_ON_ERROR))
+        ->not->toContain($b->reveal());
+});
+
+it('returns no credential when a create replays an existing server', function (): void {
+    // A one-time password is issued once. A provider replaying an earlier
+    // result has none left to give, and saying so with null is what stops a
+    // caller believing a credential it never received is safely in hand.
+    $token = (string) Str::uuid();
+    $provider = app(FakeProvider::class);
+
+    $first = $provider->createServer(fakeRequest($token));
+    $second = $provider->createServer(fakeRequest($token));
+
+    expect($first->hasCredential())->toBeTrue()
+        ->and($second->server->providerServerId)->toBe($first->server->providerServerId)
+        ->and($second->rootCredential)->toBeNull()
+        ->and($second->hasCredential())->toBeFalse()
+        // And the original credential still works: a replay changed nothing.
+        ->and($provider->credentialMatches($first->server->providerServerId, $first->rootCredential))
+        ->toBeTrue();
+});
+
+it('refuses to rotate a credential for a server it has deleted', function (): void {
+    $provider = app(FakeProvider::class);
+    $created = $provider->createServer(fakeRequest());
+
+    $provider->deleteServer($created->server->providerServerId);
+
+    expect(fn () => $provider->resetRootPassword($created->server->providerServerId))
+        ->toThrow(ProviderException::class);
+});
+
+it('advertises only the capabilities release 1.0 actually implements', function (): void {
     $provider = app(FakeProvider::class);
     $offered = array_map(
         static fn (ProviderCapability $capability): string => $capability->value,
         ProviderCapability::offeredBy($provider),
     );
 
-    expect($offered)->toEqualCanonicalizing(['power_control', 'reboot']);
+    // `password_reset` is present by an explicit decision, and its scope is
+    // narrow: it exists so a provisioning credential lost before delivery can be
+    // rotated rather than being unrecoverable. It backs no customer-facing reset
+    // flow, and advertising it does not create one. See ADR-003.
+    expect($offered)->toEqualCanonicalizing(['password_reset', 'power_control', 'reboot']);
 
-    foreach (['rebuild', 'resetPassword', 'usage', 'snapshots'] as $method) {
+    // Everything genuinely deferred stays deferred.
+    foreach (['rebuild', 'usage', 'snapshots', 'resize'] as $method) {
         expect(method_exists($provider, $method))->toBeFalse("{$method} belongs to a later release");
     }
 });

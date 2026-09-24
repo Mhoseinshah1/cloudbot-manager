@@ -46,16 +46,32 @@ final readonly class ApprovedQuote
         public ?int $exchangeRateId,
         /** That rate's exact decimal value, as a string. */
         public ?string $exchangeRate,
+        /**
+         * The currency that rate converts from, when the preview knew it.
+         *
+         * Optional because older previews did not carry it; the price row
+         * already pins the currency, so its absence narrows nothing.
+         */
+        public ?string $exchangeRateCurrency = null,
     ) {}
 
     /**
      * Whether today's quote is still the offer the customer approved.
      *
-     * Every field that a customer would notice changing, plus the FX identity
-     * the preview was bound to. The rate is compared by identity and by value:
-     * a re-recorded rate with a new id but the same number is not a change the
-     * customer needs to reconfirm, and the same id carrying a different number
-     * would be.
+     * Every field that a customer would notice changing, plus the FX authority
+     * the preview was priced against.
+     *
+     * The rate is compared by *value*, not by row identity. Rates are appended
+     * rather than updated, so recording the same number again — an operator
+     * re-entering today's rate, an import that runs twice — mints a new id for
+     * an identical figure. Refusing the sale for that told a customer their
+     * price had changed when nothing about it had, and sent them round the
+     * confirmation loop for a number that was never different. The snapshot is
+     * what the price was computed from; which historical row happened to carry
+     * it is an audit fact, and the order keeps it either way.
+     *
+     * A materially different figure still refuses, and so does a different
+     * currency.
      */
     public function stillMatches(
         PriceQuote $quote,
@@ -86,7 +102,9 @@ final readonly class ApprovedQuote
 
         // Only checked when the preview was bound to a rate. A preview that
         // never depended on FX must not start failing because one moved.
-        if ($this->exchangeRateId !== null && $this->exchangeRateId !== $quote->exchangeRateId) {
+        if ($this->exchangeRateCurrency !== null
+            && strcasecmp($this->exchangeRateCurrency, $quote->providerCurrency) !== 0) {
+            // A different currency is a different price, whatever the digits say.
             return false;
         }
 

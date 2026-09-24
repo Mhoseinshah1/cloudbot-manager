@@ -45,6 +45,50 @@ enum Permission: string
     case SettingsManage = 'settings.manage';
     case RolesManage = 'roles.manage';
 
+    /*
+    |--------------------------------------------------------------------------
+    | Operations
+    |--------------------------------------------------------------------------
+    |
+    | Added for the staff panel. Read and act are separated throughout, because
+    | the panel's whole safety model is that seeing a thing and changing it are
+    | different privileges: support reads a provisioning attempt to answer a
+    | customer, and that is nothing like being allowed to retry it.
+    |
+    */
+
+    case SubscriptionsView = 'subscriptions.view';
+    case SubscriptionsManage = 'subscriptions.manage';
+
+    case ProvidersView = 'providers.view';
+    case ProvidersManage = 'providers.manage';
+
+    /** Replacing an API token. Separate from ProvidersManage on purpose. */
+    case ProviderCredentialsManage = 'provider_credentials.manage';
+
+    /** The operator's own switches on synced catalog rows. */
+    case ProviderCatalogManage = 'provider_catalog.manage';
+
+    case ProvisioningView = 'provisioning.view';
+    case ProvisioningManage = 'provisioning.manage';
+
+    case ServerActionsView = 'server_actions.view';
+
+    case WalletView = 'wallet.view';
+
+    case NotificationsView = 'notifications.view';
+
+    case JobsView = 'jobs.view';
+    case JobsManage = 'jobs.manage';
+
+    case AlertsView = 'alerts.view';
+
+    /** Reading settings without being able to change any of them. */
+    case SettingsView = 'settings.view';
+
+    case InventoryView = 'inventory.view';
+    case InventoryManage = 'inventory.manage';
+
     /**
      * Permissions that move or reveal customer money.
      *

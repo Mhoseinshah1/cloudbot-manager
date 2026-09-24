@@ -53,6 +53,10 @@ final readonly class OutboxRouter
             OutboxTopic::ProvisioningSucceeded => $this->provisioningSucceeded($message),
             OutboxTopic::OrderRefunded => $this->orderRefunded($message),
             OutboxTopic::ServerTerminated => $this->serverTerminated($message),
+            OutboxTopic::SubscriptionExpiryWarning,
+            OutboxTopic::SubscriptionGraceEntered,
+            OutboxTopic::SubscriptionTerminationWarning,
+            OutboxTopic::SubscriptionRenewed => $this->subscriptionLifecycle($message),
             OutboxTopic::ProvisioningNeedsAttention,
             OutboxTopic::ProvisioningFailed,
             OutboxTopic::InventoryDiscrepancy => $this->operationalAlert($message),
@@ -142,6 +146,50 @@ final readonly class OutboxRouter
             OutboxTopic::ProvisioningSucceeded,
             CustomerMessages::provisioningSucceeded($facts),
             ['order_id' => $order->getKey(), 'order_number' => $order->order_number, 'server_id' => $server?->getKey()],
+            (int) $message->getKey(),
+            self::deliveryKey($message),
+        );
+
+        return OutboxDisposition::from($outcome);
+    }
+
+    /**
+     * One of the four things that happen to a service's life.
+     *
+     * All four carry the same shape of fact — a subscription, a server, a
+     * moment — so they share a handler and differ only in the words. The
+     * payload written at the transition is what is read here rather than the
+     * live rows: the message describes what was true when the decision was
+     * made, and a subscription that has since been renewed must not turn a
+     * "your service expired" notice into a claim about its new period.
+     */
+    private function subscriptionLifecycle(OutboxMessage $message): OutboxDisposition
+    {
+        $userId = $this->intFrom($message, 'user_id');
+        $customer = $userId === null ? null : User::query()->whereKey($userId)->first();
+
+        if (! $customer instanceof User) {
+            return OutboxDisposition::finished();
+        }
+
+        /** @var array<string, mixed> $facts */
+        $facts = $message->payload ?? [];
+
+        $text = match ($message->topic) {
+            OutboxTopic::SubscriptionExpiryWarning => CustomerMessages::subscriptionExpiryWarning($facts),
+            OutboxTopic::SubscriptionGraceEntered => CustomerMessages::subscriptionGraceEntered($facts),
+            OutboxTopic::SubscriptionTerminationWarning => CustomerMessages::subscriptionTerminationWarning($facts),
+            default => CustomerMessages::subscriptionRenewed($facts),
+        };
+
+        $outcome = $this->notifications->toCustomer(
+            $customer,
+            $message->topic,
+            $text,
+            [
+                'subscription_id' => $this->intFrom($message, 'subscription_id'),
+                'server_id' => $this->intFrom($message, 'server_id'),
+            ],
             (int) $message->getKey(),
             self::deliveryKey($message),
         );

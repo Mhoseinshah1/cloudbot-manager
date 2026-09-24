@@ -101,6 +101,48 @@ final readonly class SettingsService
     }
 
     /**
+     * A list of positive whole days, or null if the setting cannot be read.
+     *
+     * Strict for the same reason the others are: a warning schedule stored as
+     * `["three", -1]` is a misconfiguration, and reading part of it would send
+     * some warnings and silently drop the rest. Values are de-duplicated and
+     * ordered furthest-first so the earliest warning is offered first.
+     *
+     * @return list<int>|null
+     */
+    public function dayThresholds(SettingKey $key): ?array
+    {
+        $value = $this->typed($key);
+
+        if (! is_array($value)) {
+            return null;
+        }
+
+        $days = [];
+
+        foreach ($value as $entry) {
+            if (is_string($entry) && preg_match('/^\d+$/', trim($entry)) === 1) {
+                $entry = (int) trim($entry);
+            }
+
+            if (! is_int($entry) || $entry <= 0) {
+                // A negative or unreadable threshold is not a schedule.
+                return null;
+            }
+
+            $days[$entry] = $entry;
+        }
+
+        if ($days === []) {
+            return null;
+        }
+
+        rsort($days);
+
+        return array_values($days);
+    }
+
+    /**
      * Store a setting. Privileged: these are the controls on the business.
      *
      * The value must already be the type the key declares. Nothing here

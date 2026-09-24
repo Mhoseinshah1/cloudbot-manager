@@ -131,7 +131,7 @@ final class ProviderConformance
             });
 
             it('creates a server and normalizes it', function () use ($resolve, $fixtures, $request): void {
-                $server = $resolve()->createServer($request($fixtures));
+                $server = $resolve()->createServer($request($fixtures))->server;
 
                 expect($server)->toBeInstanceOf(ProviderServerData::class)
                     ->and($server->providerServerId)->not->toBe('')
@@ -141,8 +141,8 @@ final class ProviderConformance
             it('gives every server a distinct identity', function () use ($resolve, $fixtures, $request): void {
                 $provider = $resolve();
 
-                $first = $provider->createServer($request($fixtures));
-                $second = $provider->createServer($request($fixtures));
+                $first = $provider->createServer($request($fixtures))->server;
+                $second = $provider->createServer($request($fixtures))->server;
 
                 expect($first->providerServerId)->not->toBe($second->providerServerId);
             });
@@ -152,8 +152,8 @@ final class ProviderConformance
                 // the server the first attempt made, not build another one.
                 $token = (string) Str::uuid();
 
-                $first = $resolve()->createServer($request($fixtures, $token));
-                $second = $resolve()->createServer($request($fixtures, $token));
+                $first = $resolve()->createServer($request($fixtures, $token))->server;
+                $second = $resolve()->createServer($request($fixtures, $token))->server;
 
                 expect($second->providerServerId)->toBe($first->providerServerId);
             });
@@ -164,11 +164,11 @@ final class ProviderConformance
 
                 $first = $provider->createServer(new CreateServerRequest(
                     $token, $fixtures['plan'], $fixtures['location'], $fixtures['image'], 'original-name',
-                ));
+                ))->server;
 
                 $second = $provider->createServer(new CreateServerRequest(
                     $token, $fixtures['plan'], $fixtures['location'], $fixtures['image'], 'different-name',
-                ));
+                ))->server;
 
                 expect($second->providerServerId)->toBe($first->providerServerId)
                     ->and($second->name)->toBe($first->name);
@@ -176,7 +176,7 @@ final class ProviderConformance
 
             it('finds a server by its provisioning token', function () use ($resolve, $fixtures, $request): void {
                 $token = (string) Str::uuid();
-                $created = $resolve()->createServer($request($fixtures, $token));
+                $created = $resolve()->createServer($request($fixtures, $token))->server;
 
                 // Resolved separately, as the recovery path would be.
                 $found = $resolve()->findByProvisioningToken($token);
@@ -193,7 +193,7 @@ final class ProviderConformance
             });
 
             it('reads back a created server consistently', function () use ($resolve, $fixtures, $request): void {
-                $created = $resolve()->createServer($request($fixtures));
+                $created = $resolve()->createServer($request($fixtures))->server;
                 $fetched = $resolve()->getServer($created->providerServerId);
 
                 expect($fetched->providerServerId)->toBe($created->providerServerId)
@@ -201,7 +201,7 @@ final class ProviderConformance
             });
 
             it('lists a created server', function () use ($resolve, $fixtures, $request): void {
-                $created = $resolve()->createServer($request($fixtures));
+                $created = $resolve()->createServer($request($fixtures))->server;
 
                 $ids = array_map(
                     static fn (ProviderServerData $server): string => $server->providerServerId,
@@ -226,7 +226,7 @@ final class ProviderConformance
                 // never there answers null; and neither is reachable by any
                 // exception, which is what stops a rejected credential or a
                 // timeout being read as "the customer's machine is gone".
-                $created = $resolve()->createServer($request($fixtures));
+                $created = $resolve()->createServer($request($fixtures))->server;
 
                 $present = $resolve()->getServer($created->providerServerId);
 
@@ -236,7 +236,7 @@ final class ProviderConformance
             });
 
             it('deletes a server and stops listing it', function () use ($resolve, $fixtures, $request): void {
-                $created = $resolve()->createServer($request($fixtures));
+                $created = $resolve()->createServer($request($fixtures))->server;
 
                 $action = $resolve()->deleteServer($created->providerServerId);
 
@@ -256,7 +256,7 @@ final class ProviderConformance
                 // facts, and reconciliation needs both: one says what became of
                 // a machine we sold, the other says we are asking about
                 // something that was never real.
-                $created = $resolve()->createServer($request($fixtures));
+                $created = $resolve()->createServer($request($fixtures))->server;
 
                 $resolve()->deleteServer($created->providerServerId);
 
@@ -278,12 +278,12 @@ final class ProviderConformance
                 $token = (string) Str::uuid();
                 $provider = $resolve();
 
-                $original = $provider->createServer($request($fixtures, $token));
+                $original = $provider->createServer($request($fixtures, $token))->server;
                 $before = count($provider->listServers());
 
                 $provider->deleteServer($original->providerServerId);
 
-                $retried = $provider->createServer($request($fixtures, $token));
+                $retried = $provider->createServer($request($fixtures, $token))->server;
 
                 expect($retried->providerServerId)->toBe($original->providerServerId);
 
@@ -305,17 +305,17 @@ final class ProviderConformance
             it('creates a distinct server for a genuinely new token', function () use ($resolve, $fixtures, $request): void {
                 $provider = $resolve();
 
-                $first = $provider->createServer($request($fixtures));
+                $first = $provider->createServer($request($fixtures))->server;
                 $provider->deleteServer($first->providerServerId);
 
-                $second = $provider->createServer($request($fixtures));
+                $second = $provider->createServer($request($fixtures))->server;
 
                 expect($second->providerServerId)->not->toBe($first->providerServerId)
                     ->and($second->status->exists())->toBeTrue();
             });
 
             it('normalizes actions and can read them back', function () use ($resolve, $fixtures, $request): void {
-                $created = $resolve()->createServer($request($fixtures));
+                $created = $resolve()->createServer($request($fixtures))->server;
                 $action = $resolve()->deleteServer($created->providerServerId);
 
                 $fetched = $resolve()->getAction($action->providerActionId);
@@ -329,7 +329,7 @@ final class ProviderConformance
                 // Provider responses are untrusted input. Nothing that crosses
                 // this boundary may carry a secret-shaped key.
                 $provider = $resolve();
-                $server = $provider->createServer($request($fixtures));
+                $server = $provider->createServer($request($fixtures))->server;
 
                 $surfaces = [
                     $server->metadata->toArray(),
@@ -360,7 +360,7 @@ final class ProviderConformance
                     return;
                 }
 
-                $server = $provider->createServer($request($fixtures));
+                $server = $provider->createServer($request($fixtures))->server;
 
                 expect($provider->powerOff($server->providerServerId))->toBeInstanceOf(ProviderActionData::class)
                     ->and($provider->getServer($server->providerServerId)->powerState->value)->toBe('off');
@@ -378,7 +378,7 @@ final class ProviderConformance
                     return;
                 }
 
-                $server = $provider->createServer($request($fixtures));
+                $server = $provider->createServer($request($fixtures))->server;
 
                 expect($provider->reboot($server->providerServerId))->toBeInstanceOf(ProviderActionData::class)
                     ->and($provider->getServer($server->providerServerId)->powerState->value)->toBe('on');

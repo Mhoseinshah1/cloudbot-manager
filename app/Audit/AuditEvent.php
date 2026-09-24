@@ -31,6 +31,27 @@ final class AuditEvent
 
     public const SettingChanged = 'setting.changed';
 
+    /** An operator suspended, banned or reactivated a customer account. */
+    public const CustomerStatusChanged = 'customer.status_changed';
+
+    /** An operator enabled or disabled a provider. */
+    public const ProviderAvailabilityChanged = 'provider.availability_changed';
+
+    /** An operator replaced a provider's API credential. */
+    public const ProviderCredentialReplaced = 'provider.credential_replaced';
+
+    /** An operator asked for an order to be reconciled against its provider. */
+    public const OrderReconcileRequested = 'order.reconcile_requested';
+
+    /** An operator asked for a stalled provisioning to be retried. */
+    public const ProvisioningRetryRequested = 'provisioning.retry_requested';
+
+    /** An operator attached an unexplained remote machine to an order. */
+    public const InventoryOrphanLinked = 'inventory.orphan_linked';
+
+    /** An operator retried a failed queue job. */
+    public const FailedJobRetried = 'jobs.failed_retried';
+
     public const WalletCredit = 'wallet.credit';
 
     public const WalletDebit = 'wallet.debit';
@@ -83,6 +104,15 @@ final class AuditEvent
     public const ServerCreated = 'server.created';
 
     public const SubscriptionCreated = 'subscription.created';
+
+    /** A customer paid to extend one service period. */
+    public const SubscriptionRenewed = 'subscription.renewed';
+
+    /** A period ended and the renewal grace window opened. */
+    public const SubscriptionGraceEntered = 'subscription.grace_entered';
+
+    /** Grace ran out and deletion of the machine was requested. */
+    public const SubscriptionTerminationRequested = 'subscription.termination_requested';
 
     /*
      * Inventory drift. What the provider holds, against what we sold.

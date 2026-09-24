@@ -96,6 +96,31 @@ final readonly class OperationalAlerts
     }
 
     /**
+     * The provider says a machine we sold is in an error state.
+     *
+     * It exists, so this is not a missing server and nothing about money
+     * changes. What it is not is healthy, and a customer must not be shown a
+     * server as working while the provider reports otherwise.
+     *
+     * @param  array<string, scalar|null>  $facts
+     */
+    public function remoteUnhealthy(Server $server, array $facts = []): void
+    {
+        $this->inventoryDiscrepancy(
+            $server,
+            'remote_unhealthy',
+            'inventory:server:'.$server->getKey().':remote_unhealthy',
+            [
+                'server_id' => $server->getKey(),
+                'user_id' => $server->user_id,
+                'provider_id' => $server->provider_id,
+                'provider_server_id' => $server->provider_server_id,
+                ...$facts,
+            ],
+        );
+    }
+
+    /**
      * A server we sold has no remote counterpart.
      *
      * @param  array<string, scalar|null>  $facts

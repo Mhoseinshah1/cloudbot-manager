@@ -6,8 +6,10 @@ namespace App\Provisioning;
 
 use App\Audit\AuditEvent;
 use App\Audit\AuditRecorder;
+use App\Cloud\Data\ProviderCreateResult;
 use App\Cloud\Data\ProviderServerData;
 use App\Cloud\Enums\ProviderErrorCategory;
+use App\Enums\CredentialEvidence;
 use App\Enums\ProvisioningOutcome;
 use App\Enums\ProvisioningStage;
 use App\Models\Order;
@@ -112,6 +114,84 @@ final readonly class AttemptRecorder
     }
 
     /**
+     * Record what the create response said, before anything can lose it.
+     *
+     * Committed on its own, immediately, and deliberately before local
+     * persistence begins. The window this closes is the one Phase 7 is built
+     * around: the provider has acted, the response is in memory, and the next
+     * thing that happens might be the process ending. Whatever is not durable
+     * at that instant is gone.
+     *
+     * What is written is a fact about the *shape* of the answer, never its
+     * content: whether this call built the machine, and whether it issued a
+     * root password. No plaintext, no digest of the customer's credential, no
+     * provider metadata. A boolean is enough for the only question recovery
+     * needs to ask later — does this machine need a password before it can be
+     * delivered?
+     *
+     * Nothing is written for a replay. An `Existing` answer carries no
+     * credential because the create already happened, not because the machine
+     * has none, and recording `false` there would erase the truth about a
+     * password the original create did issue. Silence is the honest value: it
+     * leaves the evidence exactly as whatever the real create left it.
+     *
+     * The stage and outcome are untouched. The provider answering is not the
+     * same as the order being delivered, and a create attempt that still has
+     * local adoption outstanding must not read as finished.
+     */
+    public function recordCreateResponse(ProvisioningAttempt $attempt, ProviderCreateResult $created): ProvisioningAttempt
+    {
+        if (! $created->isNew()) {
+            // A replay establishes nothing. Anything already recorded stands.
+            return $attempt;
+        }
+
+        $attempt->forceFill([
+            'result_summary' => self::resultSummary($created->server, [
+                'create_disposition' => $created->disposition->value,
+                'root_credential_issued' => $created->hasCredential(),
+            ]),
+        ])->save();
+
+        return $attempt;
+    }
+
+    /**
+     * What is durably known about this order's root credential.
+     *
+     * Read from the forensic attempts rather than from anything a provider says
+     * now: `ProviderServerData` is credential-free by construction, so asking
+     * the provider what kind of machine this is would be reading an expectation
+     * into a silence that means nothing.
+     *
+     * The most recent create response wins, because an order can legitimately
+     * create more than once — an earlier attempt whose machine was tombstoned,
+     * for instance — and it is the machine that exists now whose credential is
+     * in question.
+     */
+    public function credentialEvidence(Order $order): CredentialEvidence
+    {
+        $attempts = ProvisioningAttempt::query()
+            ->where('order_id', $order->getKey())
+            ->orderByDesc('attempt_no')
+            ->get(['result_summary']);
+
+        foreach ($attempts as $attempt) {
+            $summary = $attempt->result_summary;
+
+            if (! is_array($summary) || ! array_key_exists('root_credential_issued', $summary)) {
+                continue;
+            }
+
+            return $summary['root_credential_issued'] === true
+                ? CredentialEvidence::KnownIssued
+                : CredentialEvidence::KnownNone;
+        }
+
+        return CredentialEvidence::Unknown;
+    }
+
+    /**
      * Close an attempt with what actually happened.
      *
      * @param  array<string, scalar|null>  $extra  Additional safe facts.
@@ -129,7 +209,16 @@ final readonly class AttemptRecorder
             'outcome' => $outcome,
             'error_category' => $category,
             'finished_at' => CarbonImmutable::now(),
-            'result_summary' => self::resultSummary($server, $extra),
+            // Carried forward rather than replaced. What the create response
+            // said about credential issuance was committed the moment it
+            // arrived, precisely because it might be the only record of it —
+            // and closing the attempt with what happened next must not erase
+            // it. Rewriting the summary wholesale would delete the one fact
+            // recovery reads later.
+            'result_summary' => self::resultSummary($server, [
+                ...self::carriedFacts($attempt),
+                ...$extra,
+            ]),
         ])->save();
 
         if ($outcome !== ProvisioningOutcome::Succeeded && $outcome !== ProvisioningOutcome::RecoveredExisting) {
@@ -148,6 +237,34 @@ final readonly class AttemptRecorder
         }
 
         return $attempt;
+    }
+
+    /**
+     * The create-response facts already on this attempt, if any.
+     *
+     * Exactly two keys, both safe and both non-secret. Anything else in an
+     * earlier summary is a description of a provider answer that has since been
+     * superseded, and carrying it forward would muddle the record.
+     *
+     * @return array<string, scalar|null>
+     */
+    private static function carriedFacts(ProvisioningAttempt $attempt): array
+    {
+        $summary = $attempt->result_summary;
+
+        if (! is_array($summary)) {
+            return [];
+        }
+
+        $carried = [];
+
+        foreach (['create_disposition', 'root_credential_issued'] as $key) {
+            if (array_key_exists($key, $summary) && (is_scalar($summary[$key]) || $summary[$key] === null)) {
+                $carried[$key] = $summary[$key];
+            }
+        }
+
+        return $carried;
     }
 
     /**

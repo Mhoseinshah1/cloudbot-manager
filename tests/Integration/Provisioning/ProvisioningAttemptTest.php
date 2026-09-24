@@ -114,12 +114,19 @@ it('keeps an uncertain attempt uncertain, even after recovery succeeds', functio
     $scripted->afterCreate(fn ($server) => $server);
     app(ReconciliationService::class)->reconcile($order->fresh());
 
+    $rows = ProvisioningAttempt::query()->orderBy('attempt_no')->get();
+
     // The first attempt is untouched. Rewriting it into a success would erase
     // the only evidence of why a customer waited.
     expect($uncertain->fresh()->outcome)->toBe(ProvisioningOutcome::Uncertain)
-        ->and(ProvisioningAttempt::query()->count())->toBe(2)
-        ->and(ProvisioningAttempt::query()->orderBy('attempt_no')->get()->last()->outcome)
-        ->toBe(ProvisioningOutcome::RecoveredExisting);
+        // Three rows now, and the middle one is the point: the create response
+        // that was lost carried this machine's only root password, so recovery
+        // rotated it before delivering anything. That rotation is recorded on
+        // its own stage rather than hidden inside the persistence attempt.
+        ->and($rows)->toHaveCount(3)
+        ->and($rows[1]->stage)->toBe(ProvisioningStage::CredentialRecovery)
+        ->and($rows[1]->outcome)->toBe(ProvisioningOutcome::Succeeded)
+        ->and($rows->last()->outcome)->toBe(ProvisioningOutcome::RecoveredExisting);
 });
 
 it('records which stage a failure happened at', function (): void {

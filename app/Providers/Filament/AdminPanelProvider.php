@@ -44,12 +44,29 @@ class AdminPanelProvider extends PanelProvider
             ->path('admin')
             ->login()
             ->colors(['primary' => Color::Slate])
+            // Discovery, so a new resource is one file rather than a file and
+            // a registration somebody forgets. Every discovered class still
+            // decides its own access: nothing here grants visibility, and each
+            // resource and page answers `canAccess`/`canViewAny` from the
+            // operator's permissions.
+            ->discoverResources(in: app_path('Filament/Resources'), for: 'App\\Filament\\Resources')
+            ->discoverPages(in: app_path('Filament/Pages'), for: 'App\\Filament\\Pages')
+            ->discoverWidgets(in: app_path('Filament/Widgets'), for: 'App\\Filament\\Widgets')
             ->pages([
                 Dashboard::class,
-                // Registered on the panel so the middleware has somewhere to
-                // send an administrator who still owes a second factor.
+                // Registered explicitly as well as discovered, so the
+                // middleware always has somewhere to send an administrator who
+                // still owes a second factor.
                 TwoFactorSetup::class,
                 TwoFactorChallenge::class,
+            ])
+            ->navigationGroups([
+                'Operations',
+                'Customers',
+                'Billing',
+                'Catalog',
+                'Providers',
+                'System',
             ])
             ->middleware([
                 EncryptCookies::class,

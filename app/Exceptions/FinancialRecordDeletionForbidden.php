@@ -26,6 +26,22 @@ final class FinancialRecordDeletionForbidden extends RuntimeException
         parent::__construct($message);
     }
 
+    public static function forSubscriptionRenewal(): self
+    {
+        return new self(
+            'subscription_renewal',
+            'Subscription renewals are retained financial history and cannot be changed or deleted.',
+        );
+    }
+
+    public static function forExchangeRate(): self
+    {
+        return new self(
+            'exchange_rate',
+            'Exchange rates are append-only history; record a new rate instead.',
+        );
+    }
+
     public static function forPayment(): self
     {
         return new self('payment', 'Payments are retained financial history and cannot be deleted.');

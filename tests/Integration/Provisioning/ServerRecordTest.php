@@ -214,10 +214,20 @@ it('stores a root password encrypted, hidden, and nowhere else', function (): vo
     }
 });
 
-it('leaves the root password null when the provider issues none', function (): void {
-    // FakeProvider returns no credential, and inventing a placeholder would be
-    // worse than nothing: a plaintext fallback nobody asked for.
-    expect($this->server->root_password_encrypted)->toBeNull();
+it('stores the root password the provider issued, encrypted', function (): void {
+    // The simulator issues a one-time password on creation, as a
+    // password-authenticating provider does. It has exactly one home, and the
+    // provider is asked to confirm it rather than to hand it back: the provider
+    // keeps only a one-way verifier, so there is nothing to hand back.
+    $stored = $this->server->fresh()->root_password_encrypted;
+
+    expect($stored)->not->toBeNull()
+        ->and(Tests\Support\Provisioning\Simulator::plain()->credentialMatches(
+            (string) $this->server->provider_server_id, $stored,
+        ))->toBeTrue()
+        // And the column holds ciphertext, not the password as typed.
+        ->and(DB::table('servers')->where('id', $this->server->getKey())->value('root_password_encrypted'))
+        ->not->toBe($stored);
 });
 
 it('keeps no provider credential in the metadata it stored', function (): void {

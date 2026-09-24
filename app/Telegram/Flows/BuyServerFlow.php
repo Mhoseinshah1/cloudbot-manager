@@ -319,6 +319,7 @@ final readonly class BuyServerFlow
             'preview_price_toman' => $quote->sellingPriceToman,
             'preview_exchange_rate_id' => $quote->exchangeRateId,
             'preview_exchange_rate' => $quote->exchangeRate,
+            'preview_exchange_rate_currency' => $quote->providerCurrency,
             'preview_aup_version' => $aup,
             'preview_image_id' => $resolved,
         ]);
@@ -448,12 +449,20 @@ final readonly class BuyServerFlow
                 aupVersion: $version,
                 exchangeRateId: FlowState::intOf($state, 'preview_exchange_rate_id'),
                 exchangeRate: FlowState::stringOf($state, 'preview_exchange_rate'),
+                exchangeRateCurrency: FlowState::stringOf($state, 'preview_exchange_rate_currency'),
             ),
         );
 
         try {
             $order = $this->orders->place($intent);
-            $order = $this->orders->payFromWallet($this->orders->awaitPayment($order), $context->customer);
+
+            // Resumable rather than sequential. `place()` returns the order
+            // this intent already made, and a crash between any two of the
+            // durable steps behind a purchase means the one that is missing
+            // is not always the next one — so the domain decides which step
+            // to perform from the order's persisted state, and this flow does
+            // not reimplement that reasoning next to a keyboard.
+            $order = $this->orders->settleFromWallet($order, $context->customer);
         } catch (OrderNotPlaceable $refused) {
             $this->handleRefusal($context, $state, $refused);
 
