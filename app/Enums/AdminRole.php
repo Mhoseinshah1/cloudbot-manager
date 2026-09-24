@@ -46,6 +46,14 @@ enum AdminRole: string
                 Permission::InvoicesManage,
                 Permission::FinancialReportsView,
                 Permission::AuditView,
+                // Reading only. Finance needs to see the ledger it is
+                // adjusting and the subscriptions it is billing for, and needs
+                // an order's context to judge a refund — but gains no power
+                // over servers, providers, provisioning or settings. Every
+                // entry below is a `View`, and that is the point.
+                Permission::WalletView,
+                Permission::SubscriptionsView,
+                Permission::OrdersView,
             ],
 
             // Day-to-day customer and server operations. Deliberately holds no
@@ -60,6 +68,20 @@ enum AdminRole: string
                 Permission::ServersView,
                 Permission::ServersManage,
                 Permission::AuditView,
+                // Operational sight and the non-financial actions that go with
+                // answering a customer: read a provisioning attempt, ask for a
+                // reconcile, look at a server action. Still no money, no
+                // provider credentials, no settings and no roles — support can
+                // find out what happened and ask the system to re-check it,
+                // which is a different thing from being able to change it.
+                Permission::ProvisioningView,
+                Permission::ProvisioningManage,
+                Permission::ServerActionsView,
+                Permission::SubscriptionsView,
+                Permission::ProvidersView,
+                Permission::NotificationsView,
+                Permission::AlertsView,
+                Permission::InventoryView,
             ],
         };
     }
