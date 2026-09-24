@@ -93,8 +93,8 @@ class StuckOrders extends Page implements HasTable
                     ->label('Open')
                     ->icon('heroicon-o-arrow-top-right-on-square')
                     ->url(fn (Order $record): string => OrderResource::getUrl('view', ['record' => $record])),
-                OrderResource::reconcileAction(),
-                OrderResource::retryAction(),
+                OrderResource::reconcileAction(Action::class),
+                OrderResource::retryAction(Action::class),
             ])
             ->bulkActions([])
             ->defaultSort('created_at')
@@ -103,6 +103,9 @@ class StuckOrders extends Page implements HasTable
 
     /**
      * Paid, unfinished, and not settled one way or the other.
+     */
+    /**
+     * @return Builder<Order>
      */
     private static function baseQuery(): Builder
     {

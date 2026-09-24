@@ -15,6 +15,7 @@ use App\Cloud\Enums\ProviderActionStatus;
 use App\Cloud\Enums\ProviderPowerState;
 use App\Cloud\Enums\ProviderServerStatus;
 use App\Cloud\Exceptions\ProviderException;
+use Brick\Math\BigDecimal;
 use DateTimeImmutable;
 
 /**
@@ -193,8 +194,11 @@ final readonly class HetznerNormalizer
 
             $monthly = self::priceOf($price, 'price_monthly');
 
+            // `ProviderPrice::of()` has already proven both amounts are plain
+            // decimal strings, so this cannot throw on a malformed number.
             if ($monthly instanceof ProviderPrice
-                && ($cheapest === null || bccomp($monthly->amount, $cheapest->amount, 10) < 0)) {
+                && ($cheapest === null
+                    || BigDecimal::of($monthly->amount)->isLessThan(BigDecimal::of($cheapest->amount)))) {
                 $cheapest = $monthly;
             }
         }

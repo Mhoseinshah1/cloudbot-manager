@@ -125,6 +125,15 @@ it('RCH-002: clears the previous call\'s retry evidence when a new attempt is re
 
     $scripted = Simulator::script();
 
+    // The worker died; its reservation is as old as the request. RCH-007 leaves
+    // a reservation alone while it could still be a write in flight, so a
+    // reservation stamped a moment ago is the one case where the reconciler
+    // must do nothing at all. Aging it is what makes this a dead worker rather
+    // than a slow one — which is the case this test is about.
+    ServerAction::query()->whereKey($action->getKey())
+        ->whereNotNull('provider_attempt_reserved_at')
+        ->update(['provider_attempt_reserved_at' => CarbonImmutable::now()->subHour()]);
+
     $this->reconciler->reconcile(ageForSweep($action));
 
     // No second delete, and the machine is untouched.

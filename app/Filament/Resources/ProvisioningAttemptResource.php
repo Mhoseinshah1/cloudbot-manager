@@ -76,7 +76,7 @@ class ProvisioningAttemptResource extends Resource
     }
 
     /**
-     * @return array<string, class-string>
+     * @return array<string, \Filament\Resources\Pages\PageRegistration>
      */
     public static function getPages(): array
     {

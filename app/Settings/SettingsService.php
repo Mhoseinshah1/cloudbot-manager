@@ -137,9 +137,10 @@ final readonly class SettingsService
             return null;
         }
 
+        // `rsort()` sorts in place and reindexes, so this is already a list.
         rsort($days);
 
-        return array_values($days);
+        return $days;
     }
 
     /**

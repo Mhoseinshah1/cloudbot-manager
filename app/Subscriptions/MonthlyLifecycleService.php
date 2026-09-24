@@ -15,7 +15,6 @@ use App\Enums\SubscriptionStatus;
 use App\Models\Server;
 use App\Models\ServerAction;
 use App\Models\Subscription;
-use App\Models\User;
 use App\Outbox\OutboxTopic;
 use App\Outbox\OutboxWriter;
 use App\Servers\ServerAccess;

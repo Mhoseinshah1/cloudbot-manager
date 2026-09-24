@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Filament\Resources\OrderResource\Pages;
 
 use App\Filament\Resources\OrderResource;
+use Filament\Actions\Action;
 use Filament\Infolists\Components\KeyValueEntry;
 use Filament\Infolists\Components\TextEntry;
 use Filament\Infolists\Infolist;
@@ -39,12 +40,18 @@ class ViewOrder extends ViewRecord
         ]);
     }
 
+    /**
+     * The same three operational actions the listing offers, built as page
+     * actions so they mount against this record rather than a table row.
+     *
+     * @return array<int, Action>
+     */
     protected function getHeaderActions(): array
     {
         return [
-            OrderResource::reconcileAction(),
-            OrderResource::retryAction(),
-            OrderResource::refundAction(),
+            OrderResource::reconcileAction(Action::class),
+            OrderResource::retryAction(Action::class),
+            OrderResource::refundAction(Action::class),
         ];
     }
 }

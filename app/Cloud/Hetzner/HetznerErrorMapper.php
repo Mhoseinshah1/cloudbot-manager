@@ -194,7 +194,11 @@ final readonly class HetznerErrorMapper
         };
     }
 
-    /** Hetzner's machine-readable code, when the body carries one. */
+    /**
+     * Hetzner's machine-readable code, when the body carries one.
+     *
+     * @param  array<string, mixed>  $body  The decoded response, if any.
+     */
     public static function errorCode(array $body): ?string
     {
         $error = $body['error'] ?? null;
@@ -208,6 +212,7 @@ final readonly class HetznerErrorMapper
         return is_string($code) && $code !== '' ? $code : null;
     }
 
+    /** @param array<string, mixed> $body The decoded response, if any. */
     private static function message(array $body, int $status): string
     {
         $error = $body['error'] ?? null;

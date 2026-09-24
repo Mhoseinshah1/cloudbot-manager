@@ -85,9 +85,6 @@ class Provider extends Model
     }
 
     /**
-     * @return HasMany<ProviderImage, $this>
-     */
-    /**
      * The machines this provider is running for us.
      *
      * @return HasMany<Server, $this>
@@ -97,6 +94,9 @@ class Provider extends Model
         return $this->hasMany(Server::class);
     }
 
+    /**
+     * @return HasMany<ProviderImage, $this>
+     */
     public function images(): HasMany
     {
         return $this->hasMany(ProviderImage::class);

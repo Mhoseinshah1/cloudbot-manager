@@ -21,6 +21,8 @@ use App\Orders\OrderService;
 use App\Pricing\Exceptions\SaleNotAvailable;
 use App\Pricing\ExchangeRateService;
 use App\Settings\SettingsService;
+use Carbon\CarbonImmutable;
+use Illuminate\Support\Facades\Date;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Str;
@@ -144,16 +146,21 @@ it('re-runs the pricing checks on every first creation', function (): void {
 });
 
 it('refuses to place an order on a stale exchange rate', function (): void {
-    // Time passing, expressed as the rate ageing: every applicable rate is now
-    // older than the threshold, so there is no fresh one to fall back to.
+    // Time passing, expressed as time actually passing. Exchange rates are
+    // append-only history and the database enforces it, so the rate cannot be
+    // back-dated in place any more. Moving the clock forward ages every
+    // applicable rate at once and leaves no fresher row to fall back to, which
+    // is the same situation and the only honest way to reach it.
     app(SettingsService::class)->set(SettingKey::FxMaxAgeMinutes, 60, $this->floor->owner);
-    DB::table('exchange_rates')->update(['effective_from' => now()->subHours(3)]);
+    Date::setTestNow(CarbonImmutable::now()->addHours(3));
 
     try {
         $this->orders->place(intentFor());
         $this->fail('An order was placed on a stale rate.');
     } catch (SaleNotAvailable $refusal) {
         expect($refusal->reason)->toBe(SaleRefusalReason::StaleFxRate);
+    } finally {
+        Date::setTestNow();
     }
 });
 

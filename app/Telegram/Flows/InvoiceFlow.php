@@ -138,6 +138,7 @@ final readonly class InvoiceFlow
     {
         return match ($type) {
             InvoiceType::ServerPurchase => 'خرید سرور',
+            InvoiceType::ServerRenewal => 'تمدید سرور',
             InvoiceType::WalletTopUp => 'افزایش موجودی کیف پول',
         };
     }

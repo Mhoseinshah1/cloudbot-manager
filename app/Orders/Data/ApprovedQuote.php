@@ -6,6 +6,7 @@ namespace App\Orders\Data;
 
 use App\Enums\ImageSelectionMode;
 use App\Pricing\Data\PriceQuote;
+use Brick\Math\BigDecimal;
 
 /**
  * What the customer was actually shown before they pressed pay.
@@ -129,8 +130,12 @@ final readonly class ApprovedQuote
      *
      * "92345.10" and "92345.1" are the same rate written differently, and a
      * customer must not be sent round the confirmation loop by trailing zeroes.
-     * bccomp works on the digits; a float comparison would answer a slightly
-     * different question about slightly different numbers.
+     * BigDecimal compares the digits; a float comparison would answer a
+     * slightly different question about slightly different numbers.
+     *
+     * Through `brick/math` rather than `bccomp()`, which this package does not
+     * require: on a host without ext-bcmath the bare function call raises an
+     * `Error` in the middle of placing an order. The comparison is the same.
      */
     private static function sameDecimal(string $left, string $right): bool
     {
@@ -142,7 +147,7 @@ final readonly class ApprovedQuote
             return false;
         }
 
-        return bccomp($left, $right, 20) === 0;
+        return BigDecimal::of($left)->compareTo(BigDecimal::of($right)) === 0;
     }
 
     private static function isDecimal(string $value): bool

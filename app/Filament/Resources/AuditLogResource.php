@@ -11,7 +11,6 @@ use App\Models\AuditLog;
 use Filament\Resources\Resource;
 use Filament\Tables;
 use Filament\Tables\Table;
-use Illuminate\Database\Eloquent\Builder;
 
 /**
  * The append-only record of who did what.
@@ -72,7 +71,7 @@ class AuditLogResource extends Resource
     }
 
     /**
-     * @return array<string, class-string>
+     * @return array<string, \Filament\Resources\Pages\PageRegistration>
      */
     public static function getPages(): array
     {

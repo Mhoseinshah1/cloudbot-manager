@@ -16,8 +16,10 @@ it('resolves a registered code to its implementation', function (): void {
 });
 
 it('refuses a code that is not registered', function (): void {
+    expect(app(ProviderManager::class)->isRegistered('not-a-provider'))->toBeFalse();
+
     try {
-        app(ProviderManager::class)->driver('hetzner');
+        app(ProviderManager::class)->driver('not-a-provider');
         expect(false)->toBeTrue('expected a ProviderException');
     } catch (ProviderException $exception) {
         expect($exception->category)->toBe(ProviderErrorCategory::InvalidRequest);
@@ -92,9 +94,17 @@ it('only ever returns something implementing the contract', function (): void {
 
 it('registers no provider without an implementation', function (): void {
     // A registry entry for a provider that cannot provision would be a promise
-    // the system cannot keep. Hetzner arrives with its adapter.
-    expect(app(ProviderManager::class)->registeredCodes())->toBe(['fake'])
-        ->and(app(ProviderManager::class)->isRegistered('hetzner'))->toBeFalse();
+    // the system cannot keep. Hetzner has arrived with its adapter, so it is
+    // registered — and the claim that matters is unchanged: the registry holds
+    // exactly these codes, and every one of them builds a real provider.
+    $manager = app(ProviderManager::class);
+
+    expect($manager->registeredCodes())->toBe(['fake', 'hetzner']);
+
+    foreach ($manager->registeredCodes() as $code) {
+        expect($manager->isRegistered($code))->toBeTrue()
+            ->and($manager->driver($code))->toBeInstanceOf(CloudProviderInterface::class);
+    }
 });
 
 it('derives capabilities from the implemented interfaces', function (): void {

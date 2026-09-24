@@ -91,8 +91,13 @@ it('survives the administrator who set it being removed', function (): void {
 
 it('ships no seeded business values', function (): void {
     // Thresholds and kill switches arrive with the features that read them.
-    // A value seeded now would be one nobody owns.
+    // A value seeded now would be one nobody owns. The monthly lifecycle
+    // defaults are the single exception and they arrive by migration, with
+    // insert-if-missing semantics — so what must hold here is that seeding adds
+    // nothing and changes nothing, which is stricter than counting rows.
+    $before = Setting::query()->orderBy('key')->pluck('value', 'key')->all();
+
     $this->seed(Database\Seeders\DatabaseSeeder::class);
 
-    expect(Setting::query()->count())->toBe(0);
+    expect(Setting::query()->orderBy('key')->pluck('value', 'key')->all())->toBe($before);
 });

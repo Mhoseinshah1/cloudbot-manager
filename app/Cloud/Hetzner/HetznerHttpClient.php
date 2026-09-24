@@ -202,7 +202,10 @@ final readonly class HetznerHttpClient
             $last = $failure;
         }
 
-        throw $last ?? $this->errors->malformed($operation, 'no response was obtained.');
+        // Unreachable with an unset $last: the attempt budget is at least one,
+        // and every path that leaves an iteration without returning or throwing
+        // has recorded the failure it is carrying forward.
+        throw $last;
     }
 
     /**

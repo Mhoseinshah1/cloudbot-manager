@@ -2,10 +2,9 @@
 
 namespace App\Providers;
 
+use App\Auth\TwoFactor\TwoFactorSession;
 use App\Cloud\Hetzner\HetznerCredentialResolver;
 use App\Cloud\Hetzner\HetznerCredentials;
-
-use App\Auth\TwoFactor\TwoFactorSession;
 use Illuminate\Auth\Events\Logout;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\ServiceProvider;

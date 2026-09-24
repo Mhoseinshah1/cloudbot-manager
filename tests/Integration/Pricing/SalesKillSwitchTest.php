@@ -135,6 +135,11 @@ it('changes nothing about the catalog when a sale is refused', function (): void
 });
 
 it('refuses a setting change from anyone without settings.manage', function (): void {
+    // The settings table is no longer empty on a fresh install: the monthly
+    // lifecycle defaults arrive by migration. What this test is about is that
+    // a refused write adds nothing, so the baseline is what it is compared to.
+    $before = Setting::query()->count();
+
     foreach ([AdminRole::Support, AdminRole::Finance] as $role) {
         $actor = User::factory()->create();
         $actor->assignRole($role->value);
@@ -143,5 +148,6 @@ it('refuses a setting change from anyone without settings.manage', function (): 
             ->toThrow(UnauthorizedSettingChange::class);
     }
 
-    expect(Setting::query()->count())->toBe(0);
+    expect(Setting::query()->where('key', SettingKey::SalesEnabled->value)->exists())->toBeFalse()
+        ->and(Setting::query()->count())->toBe($before);
 });

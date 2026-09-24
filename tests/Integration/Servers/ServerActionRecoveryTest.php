@@ -231,6 +231,13 @@ it('G. never assumes a reserved attempt reached nobody', function (): void {
     // and that mark is not evidence the provider was never asked.
     expect($this->actions->reserveAttempt($action->fresh(), 3))->toBeTrue();
 
+    // And it died a while ago. RCH-007 leaves a reservation alone while it
+    // could still be a write in flight, so the reservation has to be as old as
+    // the request for this to be a dead worker rather than a slow one.
+    ServerAction::query()->whereKey($action->getKey())
+        ->whereNotNull('provider_attempt_reserved_at')
+        ->update(['provider_attempt_reserved_at' => CarbonImmutable::now()->subHour()]);
+
     $scripted = Simulator::script();
 
     $this->reconciler->reconcile(ageAction($action));
