@@ -70,6 +70,26 @@ return [
             'replace_placeholders' => true,
         ],
 
+        /*
+         * For a deployment that writes to a file rather than to stderr.
+         *
+         * `single` grows without bound, which on a busy host ends as a full
+         * disk — and a full disk stops the queue workers, the scheduler and
+         * PostgreSQL alike. This channel rotates daily and keeps a bounded
+         * number of days, mirroring what Docker does for container output.
+         *
+         * Retention applies to logs only. Audit and financial history lives in
+         * the database and is never pruned by anything here.
+         */
+        'daily' => [
+            'driver' => 'daily',
+            'path' => storage_path('logs/cloudbot.log'),
+            'level' => env('LOG_LEVEL', 'info'),
+            'days' => (int) env('LOG_DAILY_DAYS', 14),
+            'tap' => [RedactSecrets::class],
+            'replace_placeholders' => true,
+        ],
+
         'null' => [
             'driver' => 'monolog',
             'handler' => NullHandler::class,

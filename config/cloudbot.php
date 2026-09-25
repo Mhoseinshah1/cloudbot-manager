@@ -163,6 +163,13 @@ return [
     'telegram' => [
         'recover_after_seconds' => (int) env('TELEGRAM_RECOVER_AFTER_SECONDS', 300),
         'recover_batch' => 100,
+
+        /*
+         * The bot's public @name. Display only — it is what a deep link or a
+         * support message has to name, and it is not authority for anything.
+         * The token is the authority, and it lives nowhere near here.
+         */
+        'bot_username' => (string) env('TELEGRAM_BOT_USERNAME', ''),
     ],
 
     /*
