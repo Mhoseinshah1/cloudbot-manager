@@ -15,9 +15,13 @@
 # database holds encrypted provider tokens and server root credentials whose
 # key lives in the .env this archive also carries.
 #
-# The passphrase is kept OUTSIDE the archive, in a separate file, because a key
-# stored inside the thing it encrypts is not a key. Copy that file somewhere
-# else — a backup you cannot decrypt is not a backup.
+# The key is kept OUTSIDE the archive, in a separate file, because a key stored
+# inside the thing it encrypts is not a key. Copy that file somewhere else — a
+# backup you cannot decrypt is not a backup.
+#
+# What that file holds depends on the tool: an age identity for age, a
+# passphrase for gpg. Both are passed to the tool as a FILE PATH, never on the
+# command line and never through a shell variable.
 #
 # Every rm in this file guards its variables with :? so that an unset or empty
 # path aborts instead of expanding to something catastrophic.
@@ -46,7 +50,8 @@ usage() {
 Usage: sudo ./backup.sh [options]
 
   --output-dir <dir>    Where to write the archive. Default ./backups
-  --passphrase-file <f> Passphrase file. Default /etc/cloudbot-manager/backup.passphrase
+  --passphrase-file <f> Key file (age identity or gpg passphrase).
+                        Default /etc/cloudbot-manager/backup.passphrase
   --reason <text>       Recorded in the manifest. Default "manual"
   --quiet               Print only the resulting archive path
   --help                Show this message
@@ -94,9 +99,9 @@ main() {
     mkdir -p "${OUTPUT_DIR}"
     chmod 700 "${OUTPUT_DIR}"
 
-    local encryptor passphrase stamp archive
+    local encryptor key_file stamp archive
     encryptor="$(select_encryptor)"
-    passphrase="$(ensure_passphrase)"
+    key_file="$(ensure_key_file "${encryptor}")"
 
     stamp="$(date -u +%Y%m%dT%H%M%SZ)"
     archive="${OUTPUT_DIR}/cloudbot-${stamp}.tar.gz.${encryptor}"
@@ -112,10 +117,10 @@ main() {
     write_manifest "${WORK_DIR}" "${stamp}"
 
     say step "Building the encrypted archive"
-    build_archive "${WORK_DIR}" "${archive}" "${encryptor}" "${passphrase}"
+    build_archive "${WORK_DIR}" "${archive}" "${encryptor}" "${key_file}"
 
     say step "Verifying the archive"
-    verify_archive "${archive}" "${encryptor}" "${passphrase}"
+    verify_archive "${archive}" "${encryptor}" "${key_file}"
 
     prune_old_backups
 
@@ -140,32 +145,63 @@ select_encryptor() {
     fi
 }
 
-# The passphrase lives outside the archive, in its own root-only file. If it
-# does not exist, one is generated once and kept.
-ensure_passphrase() {
-    local dir existing generated
+# The key lives outside the archive, in its own root-only file, and is handed to
+# the encryptor as a path. If it does not exist, one is generated once and kept.
+#
+# age has no way to take a passphrase non-interactively — it prompts on the
+# terminal — so its key file is an age identity, which `--identity` reads
+# directly. gpg takes a passphrase file. Either way nothing secret is ever an
+# argument or a shell variable.
+ensure_key_file() {
+    local encryptor="$1" dir
     dir="$(dirname "${PASSPHRASE_FILE}")"
 
     if [ -r "${PASSPHRASE_FILE}" ]; then
-        existing="$(cat "${PASSPHRASE_FILE}")"
-        [ -n "${existing}" ] || die "${PASSPHRASE_FILE} is empty. Restore the real passphrase, or remove the file to generate a new one — knowing that existing archives will then be unreadable."
-        printf '%s' "${existing}"
+        [ -s "${PASSPHRASE_FILE}" ] || die "${PASSPHRASE_FILE} is empty. Restore the real key, or remove the file to generate a new one — knowing that existing archives will then be unreadable."
+        assert_key_matches_encryptor "${encryptor}"
+        printf '%s' "${PASSPHRASE_FILE}"
         return 0
     fi
 
     mkdir -p "${dir}"
     chmod 700 "${dir}"
 
-    generated="$(random_secret 32)"
-    ( umask 077; printf '%s' "${generated}" > "${PASSPHRASE_FILE}" )
+    case "${encryptor}" in
+        age)
+            ( umask 077; age-keygen -o "${PASSPHRASE_FILE}" >/dev/null 2>&1 ) \
+                || die "Could not generate an age identity at ${PASSPHRASE_FILE}."
+            ;;
+        gpg)
+            ( umask 077; printf '%s' "$(random_secret 32)" > "${PASSPHRASE_FILE}" )
+            ;;
+    esac
+
     chmod 600 "${PASSPHRASE_FILE}"
 
-    say warn "Generated a new backup passphrase at ${PASSPHRASE_FILE}."
-    say log  "  Copy that file somewhere off this host. Archives encrypted with it"
-    say log  "  cannot be decrypted without it, and it is deliberately not stored"
-    say log  "  inside them."
+    # To stderr, every line of it: this function's stdout is the key path the
+    # caller captures, so anything else written there becomes part of it.
+    say warn "Generated a new backup key at ${PASSPHRASE_FILE}."
+    say warn "  Copy that file somewhere off this host. Archives encrypted with it"
+    say warn "  cannot be decrypted without it, and it is deliberately not stored"
+    say warn "  inside them."
 
-    printf '%s' "${generated}"
+    printf '%s' "${PASSPHRASE_FILE}"
+}
+
+# An age identity handed to gpg, or a passphrase handed to age, fails in ways
+# that are easy to misread as a corrupt archive. Say which it is instead.
+assert_key_matches_encryptor() {
+    local encryptor="$1"
+
+    if [ "${encryptor}" = "age" ] && ! grep -q 'AGE-SECRET-KEY-' "${PASSPHRASE_FILE}"; then
+        die "${PASSPHRASE_FILE} does not hold an age identity, but age is the encryptor in use.
+Point --passphrase-file at the right key, or install gpg if that file is a passphrase."
+    fi
+
+    if [ "${encryptor}" = "gpg" ] && grep -q 'AGE-SECRET-KEY-' "${PASSPHRASE_FILE}"; then
+        die "${PASSPHRASE_FILE} holds an age identity, but gpg is the encryptor in use.
+Install age so the existing archives stay readable."
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -257,25 +293,26 @@ JSON
 # succeeds, so an interrupted run cannot leave something that looks like a
 # usable backup.
 build_archive() {
-    local work="$1" archive="$2" encryptor="$3" passphrase="$4"
+    local work="$1" archive="$2" encryptor="$3" key_file="$4"
     local partial="${archive}.partial"
 
     # A checksum of the plaintext contents, carried inside the archive, so a
     # restore can prove the payload survived the round trip.
     ( cd "${work}" && sha256sum -- * > SHA256SUMS )
 
+    # The key is read by the tool from its own file. Nothing secret is an
+    # argument, so nothing secret is visible in the process list.
     case "${encryptor}" in
         age)
-            # The passphrase arrives on a file descriptor, never in argv.
             tar -czf - -C "${work}" . \
-                | age --encrypt --passphrase-file /dev/fd/3 --output "${partial}" 3<<<"${passphrase}"
+                | age --encrypt --identity "${key_file}" --output "${partial}"
             ;;
         gpg)
             tar -czf - -C "${work}" . \
                 | gpg --batch --yes --quiet \
                       --symmetric --cipher-algo AES256 \
-                      --passphrase-fd 3 \
-                      --output "${partial}" 3<<<"${passphrase}"
+                      --passphrase-file "${key_file}" \
+                      --output "${partial}"
             ;;
     esac
 
@@ -290,14 +327,14 @@ build_archive() {
 # written and checks the payload, rather than trusting that tar and the
 # encryptor both did what they were asked.
 verify_archive() {
-    local archive="$1" encryptor="$2" passphrase="$3" check_dir required
+    local archive="$1" encryptor="$2" key_file="$3" check_dir required
     check_dir="$(mktemp -d "${TMPDIR:-/tmp}/cloudbot-verify.XXXXXX")"
     chmod 700 "${check_dir}"
 
     # Guarded so a failure to create the directory cannot widen the cleanup.
     verify_cleanup() { rm -rf -- "${check_dir:?}"; }
 
-    decrypt_stream "${archive}" "${encryptor}" "${passphrase}" | tar -xzf - -C "${check_dir}" \
+    decrypt_stream "${archive}" "${encryptor}" "${key_file}" | tar -xzf - -C "${check_dir}" \
         || { verify_cleanup; die "The archive could not be decrypted and unpacked."; }
 
     local missing=()
@@ -321,10 +358,10 @@ verify_archive() {
 }
 
 decrypt_stream() {
-    local archive="$1" encryptor="$2" passphrase="$3"
+    local archive="$1" encryptor="$2" key_file="$3"
     case "${encryptor}" in
-        age) age --decrypt --passphrase-file /dev/fd/3 "${archive}" 3<<<"${passphrase}" ;;
-        gpg) gpg --batch --quiet --decrypt --passphrase-fd 3 "${archive}" 3<<<"${passphrase}" ;;
+        age) age --decrypt --identity "${key_file}" "${archive}" ;;
+        gpg) gpg --batch --quiet --decrypt --passphrase-file "${key_file}" "${archive}" ;;
     esac
 }
 
@@ -390,12 +427,12 @@ ${C_GREEN}${C_BOLD}Backup complete.${C_RESET}
   Archive      ${archive}
   Size         $(du -h "${archive}" | cut -f1)
   Permissions  $(stat -c '%a' "${archive}")
-  Passphrase   ${PASSPHRASE_FILE}  (kept outside the archive, on purpose)
+  Key file     ${PASSPHRASE_FILE}  (kept outside the archive, on purpose)
   Retention    ${KEEP_DAILY} daily, ${KEEP_WEEKLY} weekly
 
 ${C_BOLD}This backup is not safe yet.${C_RESET}
   A backup on the same host as the data is not a backup. Copy the archive off
-  this machine, and keep the passphrase somewhere the archive is not — for
+  this machine, and keep the key file somewhere the archive is not — for
   example, from another host:
 
       rsync -a --chmod=600 root@this-host:${archive} /your/offsite/path/

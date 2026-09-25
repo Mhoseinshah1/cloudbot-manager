@@ -40,13 +40,15 @@ RESTORE_ENV=false
 PASSPHRASE_FILE="${CLOUDBOT_BACKUP_PASSPHRASE_FILE:-/etc/cloudbot-manager/backup.passphrase}"
 WORK_DIR=""
 SAFETY_ARCHIVE=""
+KEY_FILE_IS_TEMPORARY=""
 
 usage() {
     cat <<'USAGE'
 Usage: sudo ./restore.sh --archive <file> [options]
 
   --archive <file>      The encrypted backup to restore. Required.
-  --passphrase-file <f> Passphrase file. Default /etc/cloudbot-manager/backup.passphrase
+  --passphrase-file <f> Key file (age identity or gpg passphrase).
+                        Default /etc/cloudbot-manager/backup.passphrase
   --yes                 Proceed without the interactive confirmation phrase.
                         Required for any non-interactive run. Never a default.
   --restore-env         Also replace .env with the archived one. Off by
@@ -72,6 +74,9 @@ umask 077
 # The decrypted payload is the entire production database in plaintext. It must
 # not survive this process under any exit path.
 cleanup() {
+    if [ -n "${KEY_FILE_IS_TEMPORARY}" ] && [ -f "${KEY_FILE_IS_TEMPORARY}" ]; then
+        rm -f -- "${KEY_FILE_IS_TEMPORARY:?}"
+    fi
     if [ -n "${WORK_DIR}" ] && [ -d "${WORK_DIR}" ]; then
         rm -rf -- "${WORK_DIR:?}"
     fi
@@ -88,14 +93,14 @@ main() {
     [ -f "${ENV_FILE}" ] || die "No .env found in ${INSTALL_DIR}. This does not look like an installation to restore into."
 
     validate_archive_path
-    local encryptor passphrase
+    local encryptor key_file
     encryptor="$(detect_encryptor "${ARCHIVE}")"
-    passphrase="$(read_passphrase)"
+    key_file="$(resolve_key_file)"
 
     step "Decrypting and inspecting the archive"
     WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cloudbot-restore.XXXXXX")"
     chmod 700 "${WORK_DIR}"
-    unpack_archive "${ARCHIVE}" "${encryptor}" "${passphrase}"
+    unpack_archive "${ARCHIVE}" "${encryptor}" "${key_file}"
     verify_payload
     inspect_manifest
 
@@ -154,29 +159,47 @@ Expected a file produced by backup.sh, ending in .age or .gpg." ;;
     esac
 }
 
-read_passphrase() {
-    local value
+# The key is handed to the decryptor as a path — an age identity for age, a
+# passphrase for gpg — so nothing secret becomes an argument.
+#
+# When no key file exists, a passphrase can still be typed for a gpg archive;
+# it is written to a mode-600 file that the exit trap removes. An age identity
+# is far too long to type, so that case asks for the file instead.
+resolve_key_file() {
+    local typed tmp
+
     if [ -r "${PASSPHRASE_FILE}" ]; then
-        value="$(cat "${PASSPHRASE_FILE}")"
-        [ -n "${value}" ] || die "${PASSPHRASE_FILE} is empty."
-        printf '%s' "${value}"
+        [ -s "${PASSPHRASE_FILE}" ] || die "${PASSPHRASE_FILE} is empty."
+        printf '%s' "${PASSPHRASE_FILE}"
         return 0
     fi
 
-    interactive || die "No passphrase file at ${PASSPHRASE_FILE} and no terminal to ask on."
-    read_secret_once value "Backup passphrase (input hidden)"
-    [ -n "${value}" ] || die "The passphrase cannot be empty."
-    printf '%s' "${value}"
+    case "${ARCHIVE}" in
+        *.age) die "No key file at ${PASSPHRASE_FILE}.
+This archive is age-encrypted, so restoring it needs the age identity it was written with. Pass it with --passphrase-file." ;;
+    esac
+
+    interactive || die "No key file at ${PASSPHRASE_FILE} and no terminal to ask on."
+
+    read_secret_once typed "Backup passphrase (input hidden)"
+    [ -n "${typed}" ] || die "The passphrase cannot be empty."
+
+    tmp="${WORK_DIR:-${TMPDIR:-/tmp}}/restore-key"
+    ( umask 077; printf '%s' "${typed}" > "${tmp}" )
+    chmod 600 "${tmp}"
+    KEY_FILE_IS_TEMPORARY="${tmp}"
+
+    printf '%s' "${tmp}"
 }
 
 unpack_archive() {
-    local archive="$1" encryptor="$2" passphrase="$3"
+    local archive="$1" encryptor="$2" key_file="$3"
 
     case "${encryptor}" in
-        age) age --decrypt --passphrase-file /dev/fd/3 "${archive}" 3<<<"${passphrase}" ;;
-        gpg) gpg --batch --quiet --decrypt --passphrase-fd 3 "${archive}" 3<<<"${passphrase}" ;;
+        age) age --decrypt --identity "${key_file}" "${archive}" ;;
+        gpg) gpg --batch --quiet --decrypt --passphrase-file "${key_file}" "${archive}" ;;
     esac | tar -xzf - -C "${WORK_DIR}" \
-        || die "Could not decrypt and unpack the archive. Wrong passphrase, or the file is damaged."
+        || die "Could not decrypt and unpack the archive. Wrong key, or the file is damaged."
 
     ok "Archive decrypted."
 }
