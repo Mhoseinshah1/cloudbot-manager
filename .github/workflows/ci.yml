@@ -178,8 +178,81 @@ jobs:
 
       - name: ShellCheck
         uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # 2.0.0
+        env:
+          # -x so the deployment scripts' `# shellcheck source=` directives are
+          # followed into scripts/lib/, and a mistake in a shared helper is
+          # caught where it is used rather than reported as an unknown source.
+          SHELLCHECK_OPTS: -x
         with:
           ignore_paths: vendor
+
+      # The deployment scripts run as root against the live database, so the
+      # checks that matter are the ones about destroying data rather than
+      # style. Their finer invariants are asserted in the test suite
+      # (tests/Feature/DeploymentScriptsTest.php); these are the few worth
+      # failing the shell job for, because they are one careless line each.
+      - name: Deployment scripts are present and executable
+        run: |
+          for script in install.sh update.sh backup.sh restore.sh; do
+            test -f "${script}" || { echo "missing ${script}"; exit 1; }
+            test -x "${script}" || { echo "${script} is not executable"; exit 1; }
+            grep -q 'set -Eeuo pipefail' "${script}" \
+              || { echo "${script} does not fail fast"; exit 1; }
+          done
+          echo 'all four deployment scripts present, executable and failing fast'
+
+      - name: No deployment path destroys a volume
+        run: |
+          # Comment lines are stripped first: these scripts explain at length
+          # that they never do this, and that prose is worth keeping.
+          offenders=0
+          while IFS= read -r script; do
+            body="$(grep -vE '^[[:space:]]*#' "${script}")"
+            if printf '%s' "${body}" | grep -qE '\bdown[[:space:]]+(-v|--volumes)\b'; then
+              echo "${script}: runs docker compose down -v"; offenders=1
+            fi
+            if printf '%s' "${body}" | grep -qE '\bvolume[[:space:]]+(rm|prune)\b'; then
+              echo "${script}: removes a docker volume"; offenders=1
+            fi
+          done < <(find . -path ./vendor -prune -o -name '*.sh' -type f -print)
+          [ "${offenders}" -eq 0 ] || exit 1
+          echo 'no script removes a volume'
+
+      - name: The updater never discards operator changes
+        run: |
+          body="$(grep -vE '^[[:space:]]*#' update.sh)"
+          if printf '%s' "${body}" | grep -qE '^[[:space:]]*git[^\n]*\bclean\b'; then
+            echo 'update.sh runs git clean'; exit 1
+          fi
+          grep -q 'assert_clean_worktree' update.sh \
+            || { echo 'update.sh does not check for a dirty worktree'; exit 1; }
+          echo 'update.sh refuses to run over local modifications'
+
+      - name: The installer never regenerates an existing application key
+        run: |
+          grep -q 'Existing APP_KEY preserved' install.sh \
+            || { echo 'install.sh does not preserve an existing APP_KEY'; exit 1; }
+          if grep -vE '^[[:space:]]*#' install.sh | grep -q 'key:generate'; then
+            echo 'install.sh calls key:generate'; exit 1
+          fi
+          grep -q 'verify_app_key_in_container' install.sh \
+            || { echo 'install.sh does not verify APP_KEY in the running container'; exit 1; }
+          echo 'APP_KEY is preserved, never regenerated, and verified before use'
+
+      - name: Backups are encrypted and verified
+        run: |
+          grep -q 'select_encryptor' backup.sh || { echo 'backup.sh does not encrypt'; exit 1; }
+          grep -q 'verify_archive'   backup.sh || { echo 'backup.sh does not verify its archive'; exit 1; }
+          grep -q 'chmod 600'        backup.sh || { echo 'backup.sh does not restrict archive permissions'; exit 1; }
+          grep -q 'PASSPHRASE_FILE'  backup.sh || { echo 'backup.sh has no separate key file'; exit 1; }
+          echo 'backups are encrypted, verified, mode 600, key stored separately'
+
+      - name: Restore is never implicit
+        run: |
+          grep -q 'CONFIRM_PHRASE'  restore.sh || { echo 'restore.sh has no confirmation phrase'; exit 1; }
+          grep -q 'ASSUME_YES=false' restore.sh || { echo 'restore.sh defaults to yes'; exit 1; }
+          grep -q 'verify_payload'  restore.sh || { echo 'restore.sh does not verify archive integrity'; exit 1; }
+          echo 'restore requires explicit confirmation and verifies before replacing anything'
 
   docker:
     name: Docker build and topology
@@ -206,6 +279,42 @@ jobs:
         run: |
           docker compose --env-file .env config
           docker compose --env-file .env -f compose.yaml -f compose.dev.yaml config
+
+      # Read from the rendered configuration rather than the source file, so a
+      # change to an anchor or an interpolated default cannot slip past.
+      - name: Application binds to localhost, database and redis do not publish
+        run: |
+          rendered="$(docker compose --env-file .env config)"
+
+          printf '%s' "${rendered}" | grep -q '127.0.0.1' \
+            || { echo 'nginx is not bound to loopback'; exit 1; }
+
+          # Anything published on 0.0.0.0 would bypass the host TLS edge.
+          if printf '%s' "${rendered}" | grep -E 'published:' | grep -q '0.0.0.0'; then
+            echo 'a service publishes on all interfaces'; exit 1
+          fi
+
+          for port in 5432 6379; do
+            if printf '%s' "${rendered}" | grep -E 'published:' | grep -q "\"${port}\""; then
+              echo "port ${port} is published to the host"; exit 1
+            fi
+          done
+
+          echo 'only nginx publishes, on loopback; postgres and redis stay internal'
+
+      - name: Workers drain separate queues
+        run: |
+          rendered="$(docker compose --env-file .env config)"
+          for queue in telegram provisioning notifications; do
+            printf '%s' "${rendered}" | grep -q -- "--queue=${queue}" \
+              || { echo "no worker drains ${queue}"; exit 1; }
+          done
+          # Release 1.1. Shipping its worker early would run a process with
+          # nothing to do and imply the feature exists.
+          if printf '%s' "${rendered}" | grep -q 'billing-worker'; then
+            echo 'a billing worker is defined'; exit 1
+          fi
+          echo 'interactive, provisioning and notification work are isolated'
 
       - name: Build images
         run: |
