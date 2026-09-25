@@ -243,6 +243,43 @@ it('retains backups without touching unrelated files', function (): void {
         ->and($backup)->toContain('"${OUTPUT_DIR:?}/${file:?}"');
 });
 
+it('invokes the encryptor with flags it actually has', function (string $name): void {
+    $code = deploymentCode($name);
+
+    // Phase 14 found this the only way it can be found: by running it. age has
+    // no --passphrase-file; it prompts on a terminal and takes a key file only
+    // as --identity. The scripts used the flag that does not exist, so every
+    // age-encrypted backup failed at the point of encryption — after the dump
+    // had already been taken, which is the worst moment to discover it.
+    // Matched on the invocation form, not the word: these scripts legitimately
+    // mention age and their own --passphrase-file flag in prose.
+    expect($code)->not->toMatch('/\bage --(encrypt|decrypt)[^\n]*--passphrase-file/', "{$name} passes --passphrase-file to age");
+
+    if (str_contains($code, 'age --encrypt') || str_contains($code, 'age --decrypt')) {
+        expect($code)->toMatch('/\bage --(encrypt|decrypt)[^\n]*--identity/', "{$name} must give age an --identity");
+    }
+
+    // gpg does support a passphrase file, and must never take one as an
+    // inline argument.
+    expect($code)->not->toMatch('/\bgpg\b[^\n|]*--passphrase [^-]/', "{$name} passes a gpg passphrase in argv");
+})->with(['backup.sh', 'restore.sh']);
+
+it('rolls the source back with something that moves a checkout backwards', function (): void {
+    $code = deploymentCode('update.sh');
+
+    // `git merge --ff-only <ancestor>` reports "already up to date" and exits
+    // zero without moving anything, so a rollback built on it silently leaves
+    // the failed revision deployed while saying it rolled back. Only a reset
+    // moves a checkout backwards.
+    expect($code)->not->toMatch('/merge --ff-only "\$\{OLD_REVISION\}"/');
+
+    $rollback = substr($code, (int) strpos($code, 'attempt_source_rollback() {'));
+    expect($rollback)->toContain('reset --hard "${OLD_REVISION}"')
+        // And the rollback is only reported as done once HEAD agrees.
+        ->and($rollback)->toContain('rev-parse HEAD')
+        ->and($rollback)->toContain('Operator intervention is required');
+});
+
 it('makes restore explicit and never blind', function (): void {
     $restore = deploymentScript('restore.sh');
 

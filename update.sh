@@ -322,15 +322,28 @@ EXPLAIN
 attempt_source_rollback() {
     step "Rolling the source back to ${OLD_REVISION}"
 
-    if ! git -C "${INSTALL_DIR}" merge --ff-only "${OLD_REVISION}" 2>/dev/null; then
-        # Moving backwards is not a fast-forward; this is the one place a
-        # deliberate reset is correct, and only to a revision this script
-        # itself recorded a moment ago.
-        git -C "${INSTALL_DIR}" reset --hard "${OLD_REVISION}" >/dev/null 2>&1 || {
-            err "Could not restore ${OLD_REVISION}. The checkout needs manual attention."
-            return 1
-        }
+    # Moving backwards is never a fast-forward, so `merge --ff-only` on an
+    # ancestor reports "already up to date" and exits 0 without moving
+    # anything — which would leave the failed revision deployed while this
+    # said it had rolled back. A reset is the only thing that moves a
+    # checkout backwards, and this is the one place it is correct: to a
+    # revision this script recorded itself, moments ago.
+    git -C "${INSTALL_DIR}" reset --hard "${OLD_REVISION}" >/dev/null 2>&1 || {
+        err "Could not restore ${OLD_REVISION}. The checkout needs manual attention."
+        return 1
+    }
+
+    # Claimed only once the checkout actually says so.
+    local restored
+    restored="$(git -C "${INSTALL_DIR}" rev-parse HEAD 2>/dev/null || printf 'unknown')"
+
+    if [ "${restored}" != "${OLD_REVISION}" ]; then
+        err "Rollback did not move the checkout: HEAD is ${restored}, expected ${OLD_REVISION}."
+        err "Operator intervention is required."
+        return 1
     fi
+
+    ok "Source restored to ${OLD_REVISION}."
 
     step "Rebuilding and restarting on the previous revision"
     compose build >/dev/null 2>&1 || warn "Rebuild on the previous revision failed."
